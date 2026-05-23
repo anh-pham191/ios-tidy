@@ -82,3 +82,26 @@ func TestDashIfEmpty_passesNonEmptyThrough(t *testing.T) {
 		t.Errorf("DashIfEmpty(non-empty) = %q, want unchanged input", got)
 	}
 }
+
+func TestTable_Render_rightAlignsNumericColumns(t *testing.T) {
+	tbl := NewTable("bundle", "name", "size")
+	tbl.AddRow("com.a", "App A", "1.2 GB")
+	tbl.AddRow("com.bbbbb", "B", "12 KB")
+
+	got := tbl.Render([]Alignment{AlignLeft, AlignLeft, AlignRight})
+
+	// Header line, separator, two rows.
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4:\n%s", len(lines), got)
+	}
+	// The size column header "size" is 4 chars; the widest cell "1.2 GB" is 6.
+	// Right-aligned means "1.2 GB" sits flush right and "12 KB" is padded on
+	// the left with one space.
+	if !strings.HasSuffix(lines[2], "1.2 GB") {
+		t.Fatalf("row 1 last column not right-aligned:\n%q", lines[2])
+	}
+	if !strings.HasSuffix(lines[3], " 12 KB") {
+		t.Fatalf("row 2 last column not right-aligned with leading space:\n%q", lines[3])
+	}
+}
