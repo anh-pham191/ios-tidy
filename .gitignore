@@ -1,0 +1,11 @@
+# Build artefacts
+bin/
+dist/
+
+# Go test output
+*.test
+coverage.out
+coverage.html
+
+# macOS
+.DS_Store
