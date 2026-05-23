@@ -23,14 +23,8 @@ func main() {
 
 // dispatch is the testable core of main(). Pulling stdout, stderr,
 // args, and the seam impls out of os/globals lets unit tests run it
-// against bytes.Buffers and fakes.
-//
-// The `devices` subcommand is wired here so the test in Task 7e can
-// observe that dispatch correctly routes to newDevicesCmd. Until
-// Task 7 lands, the case is present but newDevicesCmd does not exist,
-// so we cannot reference it yet — the switch handles `devices` by
-// printing "not yet implemented" and returning a sentinel non-zero
-// exit. Task 7 replaces the case body with the real wiring.
+// against bytes.Buffers and fakes. Each subcommand case constructs
+// its handler with the injected seams and delegates.
 func dispatch(
 	ctx context.Context,
 	out, errOut io.Writer,
@@ -50,13 +44,7 @@ func dispatch(
 		printUsage(out)
 		return 0
 	case "devices":
-		// Task 7 replaces this body with:
-		//   return newDevicesCmd(out, errOut, lister, checker).Run(ctx, args[1:])
-		_ = lister
-		_ = checker
-		_ = ctx
-		fmt.Fprintln(errOut, "ios-tidy: devices subcommand not yet implemented (Task 7)")
-		return 3
+		return newDevicesCmd(out, errOut, lister, checker).Run(ctx, args[1:])
 	default:
 		fmt.Fprintf(errOut, "ios-tidy: unknown subcommand %q\n", args[0])
 		printUsage(errOut)
