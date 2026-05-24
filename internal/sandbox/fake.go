@@ -60,6 +60,13 @@ func (s *FakeSandbox) Open(ctx context.Context, udid, bundleID string) (FS, erro
 // FakeFS is a test double for FS. The recording slices let M6's destructive
 // matrix tests assert "Remove was/wasn't called" without reaching into this
 // package later. WalkResults seeds Walk's iteration; ListResults seeds List.
+//
+// Zero-value FakeFS is usable: empty result maps, nil errors, all calls
+// succeed and return zero values.
+//
+// Canned-error semantics: when a *Err field is non-nil, the corresponding
+// method still records the call (so test assertions can distinguish "not
+// called" from "called and failed"), then returns the canned error.
 type FakeFS struct {
 	mu             sync.Mutex
 	CloseCalls     int
@@ -73,12 +80,20 @@ type FakeFS struct {
 	WalkResults    map[string][]FileInfo
 	RemoveErr      error
 	RemoveAllErr   error
+	StatErr        error
+	ListErr        error
+	WalkErr        error
+	CloseErr       error
+	closed         bool
 }
 
 func (f *FakeFS) List(_ context.Context, path string) ([]FileInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ListCalls = append(f.ListCalls, path)
+	if f.ListErr != nil {
+		return nil, f.ListErr
+	}
 	return f.ListResults[path], nil
 }
 
@@ -86,6 +101,9 @@ func (f *FakeFS) Stat(_ context.Context, path string) (FileInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.StatCalls = append(f.StatCalls, path)
+	if f.StatErr != nil {
+		return FileInfo{}, f.StatErr
+	}
 	return f.StatResults[path], nil
 }
 
@@ -93,7 +111,11 @@ func (f *FakeFS) Walk(_ context.Context, root string, fn WalkFunc) error {
 	f.mu.Lock()
 	entries := f.WalkResults[root]
 	f.WalkCalls = append(f.WalkCalls, root)
+	walkErr := f.WalkErr
 	f.mu.Unlock()
+	if walkErr != nil {
+		return walkErr
+	}
 	for _, e := range entries {
 		if err := fn(e, nil); err != nil {
 			return err
@@ -120,5 +142,14 @@ func (f *FakeFS) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.CloseCalls++
-	return nil
+	f.closed = true
+	return f.CloseErr
+}
+
+// Closed reports whether Close has been called at least once. It returns
+// true even when the call returned a canned CloseErr — the spy tracks intent.
+func (f *FakeFS) Closed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
 }
