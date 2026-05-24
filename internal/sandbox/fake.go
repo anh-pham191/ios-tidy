@@ -68,23 +68,24 @@ func (s *FakeSandbox) Open(ctx context.Context, udid, bundleID string) (FS, erro
 // method still records the call (so test assertions can distinguish "not
 // called" from "called and failed"), then returns the canned error.
 type FakeFS struct {
-	mu             sync.Mutex
-	CloseCalls     int
-	ListCalls      []string
-	StatCalls      []string
-	WalkCalls      []string
-	RemoveCalls    []string
-	RemoveAllCalls []string
-	ListResults    map[string][]FileInfo
-	StatResults    map[string]FileInfo
-	WalkResults    map[string][]FileInfo
-	RemoveErr      error
-	RemoveAllErr   error
-	StatErr        error
-	ListErr        error
-	WalkErr        error
-	CloseErr       error
-	closed         bool
+	mu              sync.Mutex
+	CloseCalls      int
+	ListCalls       []string
+	StatCalls       []string
+	WalkCalls       []string
+	RemoveCalls     []string
+	RemoveAllCalls  []string
+	ListResults     map[string][]FileInfo
+	StatResults     map[string]FileInfo
+	WalkResults     map[string][]FileInfo
+	RemoveErr       error
+	RemoveErrByPath map[string]error // if non-nil and a key matches, that error is returned by Remove
+	RemoveAllErr    error
+	StatErr         error
+	ListErr         error
+	WalkErr         error
+	CloseErr        error
+	closed          bool
 }
 
 func (f *FakeFS) List(_ context.Context, path string) ([]FileInfo, error) {
@@ -128,6 +129,9 @@ func (f *FakeFS) Remove(_ context.Context, path string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.RemoveCalls = append(f.RemoveCalls, path)
+	if perPath, ok := f.RemoveErrByPath[path]; ok {
+		return perPath
+	}
 	return f.RemoveErr
 }
 
