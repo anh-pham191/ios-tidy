@@ -126,7 +126,7 @@ func (f *afcFS) List(ctx context.Context, dir string) ([]sandbox.FileInfo, error
 			// abort the whole listing.
 			continue
 		}
-		out = append(out, toSandboxFileInfo(info, child))
+		out = append(out, convertFileInfo(child, info))
 	}
 	return out, nil
 }
@@ -139,7 +139,7 @@ func (f *afcFS) Stat(ctx context.Context, p string) (sandbox.FileInfo, error) {
 	if err != nil {
 		return sandbox.FileInfo{}, err
 	}
-	return toSandboxFileInfo(info, p), nil
+	return convertFileInfo(p, info), nil
 }
 
 // Walk delegates to afc.Client.WalkDir. The afc walk func signature is
@@ -153,7 +153,7 @@ func (f *afcFS) Walk(ctx context.Context, root string, fn sandbox.WalkFunc) erro
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
-		return fn(toSandboxFileInfo(info, p), err)
+		return fn(convertFileInfo(p, info), err)
 	})
 }
 
@@ -171,10 +171,15 @@ func (f *afcFS) RemoveAll(ctx context.Context, p string) error {
 	return f.c.RemoveAll(p)
 }
 
-// toSandboxFileInfo maps afc.FileInfo → sandbox.FileInfo. Path is taken
-// from the caller because afc.FileInfo only carries the basename. ModTime
-// is left zero (see file header).
-func toSandboxFileInfo(in afc.FileInfo, fullPath string) sandbox.FileInfo {
+// convertFileInfo maps a go-ios afc.FileInfo → sandbox.FileInfo. The full
+// path is taken from the caller because afc.FileInfo only carries the
+// basename. ModTime is left at the zero value: afc.FileInfo does not
+// surface a modification timestamp at the pinned go-ios SHA (see file
+// header / RESEARCH.md §2).
+//
+// IsDir is derived from in.IsDir(), which the go-ios package implements as
+// `Type == afc.S_IFDIR` — there is no IsDir field on afc.FileInfo.
+func convertFileInfo(fullPath string, in afc.FileInfo) sandbox.FileInfo {
 	name := in.Name
 	if name == "" {
 		// Fallback: derive basename from fullPath. afc.Stat sets Name from
