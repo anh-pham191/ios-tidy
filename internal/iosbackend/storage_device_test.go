@@ -11,7 +11,9 @@ import (
 
 // TestStorage_realDevice_reportsPlausibleSizes verifies the AFC adapter against
 // a real device. Run with:
-//   IOS_TIDY_TEST_UDID=<udid> go test -tags=device ./internal/iosbackend/...
+//
+//	IOS_TIDY_TEST_UDID=<udid> go test -tags=device ./internal/iosbackend/...
+//
 // Skipped if IOS_TIDY_TEST_UDID is unset to prevent accidental runs against the
 // wrong phone (per SHARED_CONTEXT.md §5).
 func TestStorage_realDevice_reportsPlausibleSizes(t *testing.T) {
