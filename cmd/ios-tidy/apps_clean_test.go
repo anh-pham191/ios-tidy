@@ -836,3 +836,26 @@ func TestAppsClean_openErrorHintsStaleProbe(t *testing.T) {
 		t.Errorf("stderr should explain the staleness possibility; got: %q", stderr.String())
 	}
 }
+
+// TestAppsClean_zeroDevicesExits0 pins the M1 spec contract: when no devices
+// are attached, the command emits an informative stderr message and exits 0.
+// `devices` and `storage` already follow this convention; `apps clean` (via
+// resolveDevice's old error path) used to exit 1. The sentinel
+// errNoDevicesAttached lets every caller treat empty-device as a clean
+// non-error state.
+func TestAppsClean_zeroDevicesExits0(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Devices: &device.FakeLister{Devices: []device.Device{}},
+		Sandbox: &trapSandbox{t: t},
+		Store:   &loadingProbeStore{},
+	}, []string{"com.example.app"})
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0 (M1 spec: zero exit on empty device list)", exit)
+	}
+	if !strings.Contains(stderr.String(), "no devices attached") {
+		t.Errorf("stderr should explain why nothing was done; got: %q", stderr.String())
+	}
+}

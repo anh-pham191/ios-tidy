@@ -505,6 +505,30 @@ func TestRunCrashlogsClean_removeWholeCallErrorExitsNonZero(t *testing.T) {
 // "No matching crash logs." notice that runCrashlogsClean emits when
 // Client.List returns nil entries. If the `clean` arm is removed or
 // misrouted, this test catches it.
+// TestCrashLogsClean_zeroDevicesExits0 pins the M1 spec contract: when no
+// devices are attached, the command emits an informative stderr message and
+// exits 0. The sentinel errNoDevicesAttached lets resolveDevice signal "no
+// devices" distinctly from "lookup failed" so the caller can map empty to 0.
+func TestCrashLogsClean_zeroDevicesExits0(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	// Empty device list — resolveDevice should return the sentinel.
+	fl.Devices = []device.Device{}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		t.Fatalf("Remove must not be called when no devices are attached")
+		return crashlogs.RemoveResult{}, nil
+	}
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (M1 spec: zero exit on empty device list)", code)
+	}
+	if !strings.Contains(stderr.String(), "no devices attached") {
+		t.Errorf("stderr should explain why nothing was done; got: %q", stderr.String())
+	}
+}
+
 func TestRunCrashlogs_dispatchesCleanSubcommand(t *testing.T) {
 	fc, fl, fp, stdout, stderr := newCleanEnv()
 	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {

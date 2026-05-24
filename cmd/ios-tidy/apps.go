@@ -120,6 +120,9 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 	}
 
 	udid, err := resolveDevice(ctx, deps.Devices, *deviceFlag, deps.Stderr)
+	if errors.Is(err, errNoDevicesAttached) {
+		return 0
+	}
 	if err != nil {
 		return 1
 	}
@@ -329,6 +332,9 @@ func runAppsList(ctx context.Context, deps appsDeps, args []string) int {
 	}
 
 	udid, err := resolveDevice(ctx, deps.Devices, *udidFlag, deps.Stderr)
+	if errors.Is(err, errNoDevicesAttached) {
+		return 0
+	}
 	if err != nil {
 		return 1
 	}
