@@ -25,6 +25,13 @@ type FakeClient struct {
 	RemoveResult RemoveResult
 	RemoveErr    error
 	RemoveCalls  []RemoveCall
+	// RemoveFn, when non-nil, supersedes RemoveResult/RemoveErr and is invoked
+	// per call. It receives the same ctx/udid/pattern the production Client
+	// would, so tests that need to simulate dynamic behaviour (e.g. different
+	// outcomes per call, inspect ctx cancellation) can do so without touching
+	// the canned-response fields. The recording slice RemoveCalls is appended
+	// to on every call regardless of which path is taken.
+	RemoveFn func(ctx context.Context, udid, pattern string) (RemoveResult, error)
 }
 
 type ListCall struct {
@@ -64,8 +71,11 @@ func (f *FakeClient) Pull(_ context.Context, udid, pattern, dst string) (PullRes
 	return f.PullResult, nil
 }
 
-func (f *FakeClient) Remove(_ context.Context, udid, pattern string) (RemoveResult, error) {
+func (f *FakeClient) Remove(ctx context.Context, udid, pattern string) (RemoveResult, error) {
 	f.RemoveCalls = append(f.RemoveCalls, RemoveCall{UDID: udid, Pattern: pattern})
+	if f.RemoveFn != nil {
+		return f.RemoveFn(ctx, udid, pattern)
+	}
 	if f.RemoveErr != nil {
 		return RemoveResult{}, f.RemoveErr
 	}
