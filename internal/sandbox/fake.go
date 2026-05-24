@@ -57,22 +57,64 @@ func (s *FakeSandbox) Open(ctx context.Context, udid, bundleID string) (FS, erro
 	return r.FS, nil
 }
 
-// FakeFS is a test double for FS. CloseCalls counts how many times Close
-// has been called — the probe success path MUST close exactly once.
+// FakeFS is a test double for FS. The recording slices let M6's destructive
+// matrix tests assert "Remove was/wasn't called" without reaching into this
+// package later. WalkResults seeds Walk's iteration; ListResults seeds List.
 type FakeFS struct {
-	mu         sync.Mutex
-	CloseCalls int
+	mu              sync.Mutex
+	CloseCalls      int
+	ListCalls       []string
+	StatCalls       []string
+	WalkCalls       []string
+	RemoveCalls     []string
+	RemoveAllCalls  []string
+	ListResults     map[string][]FileInfo
+	StatResults     map[string]FileInfo
+	WalkResults     map[string][]FileInfo
+	RemoveErr       error
+	RemoveAllErr    error
 }
 
-func (f *FakeFS) List(ctx context.Context, path string) ([]FileInfo, error) {
-	return nil, nil
+func (f *FakeFS) List(_ context.Context, path string) ([]FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ListCalls = append(f.ListCalls, path)
+	return f.ListResults[path], nil
 }
-func (f *FakeFS) Stat(ctx context.Context, path string) (FileInfo, error) {
-	return FileInfo{}, nil
+
+func (f *FakeFS) Stat(_ context.Context, path string) (FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.StatCalls = append(f.StatCalls, path)
+	return f.StatResults[path], nil
 }
-func (f *FakeFS) Walk(ctx context.Context, root string, fn WalkFunc) error { return nil }
-func (f *FakeFS) Remove(ctx context.Context, path string) error            { return nil }
-func (f *FakeFS) RemoveAll(ctx context.Context, path string) error         { return nil }
+
+func (f *FakeFS) Walk(_ context.Context, root string, fn WalkFunc) error {
+	f.mu.Lock()
+	entries := f.WalkResults[root]
+	f.WalkCalls = append(f.WalkCalls, root)
+	f.mu.Unlock()
+	for _, e := range entries {
+		if err := fn(e, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *FakeFS) Remove(_ context.Context, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.RemoveCalls = append(f.RemoveCalls, path)
+	return f.RemoveErr
+}
+
+func (f *FakeFS) RemoveAll(_ context.Context, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.RemoveAllCalls = append(f.RemoveAllCalls, path)
+	return f.RemoveAllErr
+}
 
 func (f *FakeFS) Close() error {
 	f.mu.Lock()
