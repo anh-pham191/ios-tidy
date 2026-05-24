@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -521,6 +522,475 @@ func newAppsProbeHandler(deps serverDeps) server.ToolHandlerFunc {
 			rows[i] = row
 		}
 		return jsonResult(rows)
+	}
+}
+
+// addDestructiveTools registers crashlogs_pull, crashlogs_clean, and
+// apps_clean on s. Every destructive tool defaults to the SAFE path
+// (dry-run / "would write" / refusal) and requires explicit arg-level
+// confirmation to perform any state-changing operation. There is no
+// --yes shortcut over the MCP transport: each safety gate is independently
+// non-bypassable from the args.
+func addDestructiveTools(s mcpToolHost, deps serverDeps) {
+	s.AddTool(
+		mcp.NewTool("crashlogs_pull",
+			mcp.WithDescription(`Pull crash reports from the device to a directory on the HOST machine.
+
+This is non-destructive on the device (it does NOT delete anything) but
+DOES create files on the host machine running this MCP server. Confirm
+the destination is acceptable before calling.
+
+Args:
+  udid (optional string): target device UDID. See devices_list rules.
+  pattern (optional string): filepath.Match glob applied to filepath.Base
+    of each entry. Default "*".
+  out (REQUIRED string): destination directory on the host. MUST be an
+    absolute path with no ".." segments. The directory must already
+    exist; this tool does not mkdir for you.
+  force (optional bool): overwrite existing files at dst. Default false;
+    matching files that already exist will surface as Pull failures.
+
+Returns: JSON {pulled, bytes, dest} on success. The on-disk layout
+preserves the device's relative paths under dest.`),
+			mcp.WithString("udid", mcp.Description("target device UDID")),
+			mcp.WithString("pattern", mcp.Description("filepath.Match glob"), mcp.DefaultString("*")),
+			mcp.WithString("out", mcp.Description("destination directory on the host (REQUIRED, absolute path, no '..')")),
+			mcp.WithBoolean("force", mcp.Description("overwrite existing files"), mcp.DefaultBool(false)),
+		),
+		newCrashLogsPullHandler(deps),
+	)
+
+	s.AddTool(
+		mcp.NewTool("crashlogs_clean",
+			mcp.WithDescription(`Delete crash reports on the device.
+
+DESTRUCTIVE: this tool removes files from the device.
+
+Safety: default behaviour is DRY-RUN. Pass confirm=true to actually
+delete. Without confirm, the tool lists what would be deleted and
+returns counts; no Remove call hits the device.
+
+Args:
+  udid (optional string): target device UDID.
+  pattern (optional string): filepath.Match glob applied to filepath.Base
+    of each entry. Default "*".
+  confirm (optional bool, default false): MUST be explicitly true to
+    actually delete. Any other value (omitted, false) yields a dry-run
+    response.
+
+Returns:
+  dry-run: JSON {dryRun: true, wouldDelete, bytes, sample: [paths...]}
+    where sample contains up to 10 representative paths.
+  confirmed: JSON {dryRun: false, deleted, bytes, failures: [...]}.`),
+			mcp.WithString("udid", mcp.Description("target device UDID")),
+			mcp.WithString("pattern", mcp.Description("filepath.Match glob"), mcp.DefaultString("*")),
+			mcp.WithBoolean("confirm", mcp.Description("MUST be true to actually delete; otherwise dry-run"), mcp.DefaultBool(false)),
+			mcp.WithDestructiveHintAnnotation(true),
+		),
+		newCrashLogsCleanHandler(deps),
+	)
+
+	s.AddTool(
+		mcp.NewTool("apps_clean",
+			mcp.WithDescription(`Delete sandbox files for one app on the device.
+
+DESTRUCTIVE: this tool removes files inside an app's container on the
+device. Three independent, non-bypassable safety gates:
+
+  1. PROBE GATE: the bundle MUST have a Vended probe outcome on record
+     (see apps_probe). If not, the tool refuses and tells you to run
+     apps_probe first.
+
+  2. TYPED-BUNDLE-ID GATE: to actually delete (dry_run=false), the caller
+     MUST pass confirm_bundle_id equal to bundle_id (case-sensitive after
+     TrimSpace). There is no --yes equivalent that bypasses this.
+
+  3. DOCUMENTS ACKNOWLEDGMENT: include_documents=true requires BOTH the
+     typed-bundle-ID match AND
+     i_understand_documents_are_unrecoverable=true. User data deleted
+     from Documents/ is not recoverable.
+
+Default include combo: if none of include_tmp/include_caches/include_documents
+are set, the tool defaults to tmp + caches (Documents is NEVER
+auto-enabled).
+
+Args:
+  udid (optional string): target device UDID.
+  bundle_id (REQUIRED string): bundle ID of the app whose sandbox to clean.
+  confirm_bundle_id (string): re-state bundle_id; required to delete when
+    dry_run is false.
+  include_tmp (optional bool): include tmp/.
+  include_caches (optional bool): include Library/Caches/.
+  include_documents (optional bool): include Documents/. Requires extra ack.
+  i_understand_documents_are_unrecoverable (optional bool): MUST be true
+    to actually delete Documents/.
+  dry_run (optional bool, default true): when true, returns plans only;
+    no Sandbox.Open / no file deletion.
+
+Returns:
+  dry-run: JSON {dryRun: true, bundleID, plans: [{target, totalBytes,
+    fileCount, sample}], totalBytes}.
+  confirmed: JSON {dryRun: false, bundleID, results: [{target, deleted,
+    bytes, failures}], totalBytesFreed}.`),
+			mcp.WithString("udid", mcp.Description("target device UDID")),
+			mcp.WithString("bundle_id", mcp.Description("bundle ID of the app (REQUIRED)")),
+			mcp.WithString("confirm_bundle_id", mcp.Description("must equal bundle_id to delete (case-sensitive after TrimSpace)")),
+			mcp.WithBoolean("include_tmp", mcp.Description("include tmp/"), mcp.DefaultBool(false)),
+			mcp.WithBoolean("include_caches", mcp.Description("include Library/Caches/"), mcp.DefaultBool(false)),
+			mcp.WithBoolean("include_documents", mcp.Description("include Documents/; requires ack"), mcp.DefaultBool(false)),
+			mcp.WithBoolean("i_understand_documents_are_unrecoverable", mcp.Description("explicit acknowledgement for include_documents"), mcp.DefaultBool(false)),
+			mcp.WithBoolean("dry_run", mcp.Description("default true; pass false to delete"), mcp.DefaultBool(true)),
+			mcp.WithDestructiveHintAnnotation(true),
+		),
+		newAppsCleanHandler(deps),
+	)
+}
+
+// crashlogsCleanResult is the wire-level JSON shape returned by
+// crashlogs_clean. Two modes share one struct via the DryRun field:
+//   - dry-run: DryRun=true; WouldDelete/Bytes/Sample populated; Deleted/Failures zero.
+//   - confirmed: DryRun=false; Deleted/Bytes/Failures populated; WouldDelete/Sample zero.
+type crashlogsCleanResult struct {
+	DryRun      bool                `json:"dryRun"`
+	WouldDelete int                 `json:"wouldDelete,omitempty"`
+	Sample      []string            `json:"sample,omitempty"`
+	Deleted     int                 `json:"deleted,omitempty"`
+	Bytes       int64               `json:"bytes"`
+	Failures    []crashlogs.Failure `json:"failures,omitempty"`
+}
+
+// newCrashLogsCleanHandler returns the handler for crashlogs_clean. Default
+// behaviour is dry-run; only confirm=true reaches Client.Remove.
+func newCrashLogsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		override := req.GetString("udid", "")
+		pattern := req.GetString("pattern", "*")
+		confirm := req.GetBool("confirm", false)
+
+		udid, resolved := resolveDeviceForTool(ctx, deps, override)
+		if resolved != nil {
+			return resolved, nil
+		}
+
+		if !confirm {
+			entries, err := deps.CrashLogs.List(ctx, udid, pattern)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("list crash logs: %v", err)), nil
+			}
+			entries, err = crashlogs.MatchEntries(entries, pattern)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("bad pattern: %v", err)), nil
+			}
+			var bytes int64
+			sample := make([]string, 0, 10)
+			for i, e := range entries {
+				bytes += e.Size
+				if i < 10 {
+					sample = append(sample, e.Path)
+				}
+			}
+			return jsonResult(crashlogsCleanResult{
+				DryRun:      true,
+				WouldDelete: len(entries),
+				Bytes:       bytes,
+				Sample:      sample,
+			})
+		}
+
+		res, err := deps.CrashLogs.Remove(ctx, udid, pattern)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("remove crash logs: %v", err)), nil
+		}
+		return jsonResult(crashlogsCleanResult{
+			DryRun:   false,
+			Deleted:  res.Removed,
+			Bytes:    res.Bytes,
+			Failures: res.Failures,
+		})
+	}
+}
+
+// crashlogsPullResult is the wire-level JSON shape returned by crashlogs_pull.
+type crashlogsPullResult struct {
+	Pulled   int                 `json:"pulled"`
+	Bytes    int64               `json:"bytes"`
+	Dest     string              `json:"dest"`
+	Failures []crashlogs.Failure `json:"failures,omitempty"`
+}
+
+// validatePullOutPath enforces "absolute path with no '..' segments and the
+// directory already exists". Mirroring the CLI's behaviour (which calls
+// os.MkdirAll under runCrashLogsPull) is intentionally NOT done here — the
+// MCP caller cannot see a file-system error message the way a shell user
+// can, so we explicitly refuse non-absolute / non-existent destinations
+// rather than silently creating arbitrary host directories.
+func validatePullOutPath(out string) error {
+	if out == "" {
+		return errors.New("crashlogs_pull: out is required")
+	}
+	if !filepath.IsAbs(out) {
+		return fmt.Errorf("crashlogs_pull: out %q must be an absolute path", out)
+	}
+	// Reject any ".." segment after cleaning. filepath.Clean does NOT escape
+	// the root, but a literal ".." in the input is still a sign the caller
+	// constructed the path incorrectly; bounce it back.
+	for _, seg := range strings.Split(filepath.Clean(out), string(filepath.Separator)) {
+		if seg == ".." {
+			return fmt.Errorf("crashlogs_pull: out %q contains '..' segment", out)
+		}
+	}
+	info, err := os.Stat(out)
+	if err != nil {
+		return fmt.Errorf("crashlogs_pull: out %q: %w", out, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("crashlogs_pull: out %q is not a directory", out)
+	}
+	return nil
+}
+
+// newCrashLogsPullHandler returns the handler for crashlogs_pull.
+func newCrashLogsPullHandler(deps serverDeps) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		override := req.GetString("udid", "")
+		pattern := req.GetString("pattern", "*")
+		out := req.GetString("out", "")
+		// `force` is accepted for parity with the CLI flag; go-ios's
+		// DownloadReports does not currently expose a "force overwrite"
+		// option, so the value is recorded in the description for forward
+		// compatibility and otherwise ignored — same effective behaviour
+		// as the CLI's --force when go-ios reports overwrite failures.
+		_ = req.GetBool("force", false)
+
+		if err := validatePullOutPath(out); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		udid, resolved := resolveDeviceForTool(ctx, deps, override)
+		if resolved != nil {
+			return resolved, nil
+		}
+
+		res, err := deps.CrashLogs.Pull(ctx, udid, pattern, out)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("pull crash logs: %v", err)), nil
+		}
+		return jsonResult(crashlogsPullResult{
+			Pulled:   res.Pulled,
+			Bytes:    res.Bytes,
+			Dest:     out,
+			Failures: res.Failures,
+		})
+	}
+}
+
+// appsCleanPlanRow is one element in the dry-run plans array.
+type appsCleanPlanRow struct {
+	Target     string   `json:"target"`
+	TotalBytes int64    `json:"totalBytes"`
+	FileCount  int      `json:"fileCount"`
+	Sample     []string `json:"sample,omitempty"`
+}
+
+// appsCleanDryRunResult is the wire-level shape for dry-run apps_clean output.
+type appsCleanDryRunResult struct {
+	DryRun     bool               `json:"dryRun"`
+	BundleID   string             `json:"bundleID"`
+	Plans      []appsCleanPlanRow `json:"plans"`
+	TotalBytes int64              `json:"totalBytes"`
+}
+
+// appsCleanResultRow is one element in the confirmed-run results array.
+type appsCleanResultRow struct {
+	Target   string            `json:"target"`
+	Deleted  int               `json:"deleted"`
+	Bytes    int64             `json:"bytes"`
+	Failures []sandbox.Failure `json:"failures,omitempty"`
+}
+
+// appsCleanConfirmedResult is the wire-level shape for confirmed apps_clean output.
+type appsCleanConfirmedResult struct {
+	DryRun          bool                 `json:"dryRun"`
+	BundleID        string               `json:"bundleID"`
+	Results         []appsCleanResultRow `json:"results"`
+	TotalBytesFreed int64                `json:"totalBytesFreed"`
+}
+
+// probeVendedInResults reports whether results contains a Vended outcome for
+// bundleID. The latest entry wins by iterating in order — same semantics as
+// the CLI's probeVended helper.
+func probeVendedInResults(results []apps.ProbeResult, bundleID string) bool {
+	vended := false
+	for _, r := range results {
+		if r.BundleID != bundleID {
+			continue
+		}
+		vended = r.Outcome == apps.ProbeVended
+	}
+	return vended
+}
+
+// newAppsCleanHandler returns the handler for apps_clean.
+//
+// Order of operations (each gate independent and non-bypassable):
+//  1. Validate args. bundle_id required.
+//  2. Compute the include-target set (default tmp+caches if none set).
+//  3. Resolve the target device UDID.
+//  4. Probe-gate: refuse unless ProbeStore reports Vended for this bundle.
+//  5. When dry_run=false:
+//     - require confirm_bundle_id == bundle_id (case-sensitive after TrimSpace),
+//     - if include_documents, additionally require
+//     i_understand_documents_are_unrecoverable == true.
+//  6. Sandbox.Open, BuildPlan per target.
+//  7. If dry_run: return plans, no Execute.
+//  8. Otherwise: Execute per target, aggregate results.
+func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		override := req.GetString("udid", "")
+		bundleID := req.GetString("bundle_id", "")
+		confirmBundleID := req.GetString("confirm_bundle_id", "")
+		includeTmp := req.GetBool("include_tmp", false)
+		includeCaches := req.GetBool("include_caches", false)
+		includeDocs := req.GetBool("include_documents", false)
+		ackDocs := req.GetBool("i_understand_documents_are_unrecoverable", false)
+		// dry_run defaults to TRUE — the safe default. We cannot rely on
+		// GetBool's defaultValue to express "missing == true" because callers
+		// will sometimes pass dry_run=false explicitly; that path must
+		// activate destructive intent. So: missing → true; present-and-true → true;
+		// present-and-false → false. GetBool(name, true) gives us exactly that.
+		dryRun := req.GetBool("dry_run", true)
+
+		if bundleID == "" {
+			return mcp.NewToolResultError("apps_clean: bundle_id is required"), nil
+		}
+
+		// Default include-flag combo: tmp + caches when none of include_* set.
+		if !includeTmp && !includeCaches && !includeDocs {
+			includeTmp = true
+			includeCaches = true
+		}
+
+		// Args-first validation for the destructive path. We MUST refuse
+		// before any device I/O so the test's trap-sandbox / unset deps
+		// don't get exercised on the abort branches.
+		if !dryRun {
+			if strings.TrimSpace(confirmBundleID) != bundleID {
+				return mcp.NewToolResultError(
+					"apps_clean: confirm_bundle_id must match bundle_id exactly to delete.",
+				), nil
+			}
+			if includeDocs && !ackDocs {
+				return mcp.NewToolResultError(
+					"apps_clean: include_documents requires i_understand_documents_are_unrecoverable=true. " +
+						"Documents/ contents are NOT recoverable.",
+				), nil
+			}
+		}
+
+		udid, resolved := resolveDeviceForTool(ctx, deps, override)
+		if resolved != nil {
+			return resolved, nil
+		}
+
+		// Probe gate. Refuse unless the bundle has a Vended probe on record.
+		if deps.ProbeStore == nil {
+			return mcp.NewToolResultError("apps_clean: server has no ProbeStore wired"), nil
+		}
+		results, err := deps.ProbeStore.Load(udid)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("load probe store: %v", err)), nil
+		}
+		if !probeVendedInResults(results, bundleID) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"apps_clean: bundle %q has not been confirmed as vended on device %s. "+
+					"Run the apps_probe tool with bundles=[%q] first.",
+				bundleID, udid, bundleID,
+			)), nil
+		}
+
+		if deps.Sandbox == nil {
+			return mcp.NewToolResultError("apps_clean: server has no Sandbox wired"), nil
+		}
+		fsHandle, err := deps.Sandbox.Open(ctx, udid, bundleID)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"apps_clean: open sandbox for %q on %s: %v. "+
+					"The probe store reports vended, but the daemon now refuses; "+
+					"re-run apps_probe to refresh.",
+				bundleID, udid, err,
+			)), nil
+		}
+		defer fsHandle.Close()
+
+		// Build the target list in a stable order so the JSON output is
+		// deterministic for callers and tests.
+		var targets []sandbox.Target
+		if includeTmp {
+			targets = append(targets, sandbox.TargetTmp)
+		}
+		if includeCaches {
+			targets = append(targets, sandbox.TargetCaches)
+		}
+		if includeDocs {
+			targets = append(targets, sandbox.TargetDocuments)
+		}
+
+		plans := make([]sandbox.CleanPlan, 0, len(targets))
+		for _, tg := range targets {
+			p, err := sandbox.BuildPlan(ctx, fsHandle, tg)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("build plan for %s: %v", tg.Name, err)), nil
+			}
+			plans = append(plans, p)
+		}
+
+		if dryRun {
+			rows := make([]appsCleanPlanRow, 0, len(plans))
+			var total int64
+			for _, p := range plans {
+				sample := make([]string, 0, 10)
+				for i, fi := range p.Files {
+					if i >= 10 {
+						break
+					}
+					sample = append(sample, fi.Path)
+				}
+				rows = append(rows, appsCleanPlanRow{
+					Target:     p.Target.Name,
+					TotalBytes: p.TotalBytes,
+					FileCount:  len(p.Files),
+					Sample:     sample,
+				})
+				total += p.TotalBytes
+			}
+			return jsonResult(appsCleanDryRunResult{
+				DryRun:     true,
+				BundleID:   bundleID,
+				Plans:      rows,
+				TotalBytes: total,
+			})
+		}
+
+		// Destructive boundary reached. All three gates have cleared
+		// (probe, typed-bundle-ID, documents-ack-if-applicable).
+		resultRows := make([]appsCleanResultRow, 0, len(plans))
+		var totalFreed int64
+		for _, p := range plans {
+			r := sandbox.Execute(ctx, fsHandle, p)
+			resultRows = append(resultRows, appsCleanResultRow{
+				Target:   r.Target.Name,
+				Deleted:  r.Removed,
+				Bytes:    r.Bytes,
+				Failures: r.Failures,
+			})
+			totalFreed += r.Bytes
+		}
+		return jsonResult(appsCleanConfirmedResult{
+			DryRun:          false,
+			BundleID:        bundleID,
+			Results:         resultRows,
+			TotalBytesFreed: totalFreed,
+		})
 	}
 }
 

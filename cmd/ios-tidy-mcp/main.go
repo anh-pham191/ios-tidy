@@ -9,6 +9,9 @@
 //   - crashlogs_list      (read-only)
 //   - apps_list           (read-only)
 //   - apps_probe          (read-only; persists results to the shared cache)
+//   - crashlogs_pull      (non-destructive on device; writes to host)
+//   - crashlogs_clean     (DESTRUCTIVE; default dry-run, confirm=true required)
+//   - apps_clean          (DESTRUCTIVE; probe-gated, typed-bundle-ID confirmation)
 //
 // Safety model (binding for every destructive tool added later):
 //   - Destructive tools refuse without an explicit confirmation arg.
@@ -61,6 +64,7 @@ func main() {
 		handleVersion,
 	)
 	addReadOnlyTools(s, deps)
+	addDestructiveTools(s, deps)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("serve stdio: %v", err)
