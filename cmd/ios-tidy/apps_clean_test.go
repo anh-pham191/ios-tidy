@@ -610,3 +610,46 @@ func TestAppsClean_refusesWhenProbeIsRefused(t *testing.T) {
 		t.Errorf("stderr = %q, want refusal explanation", stderr.String())
 	}
 }
+
+// TestAppsClean_openErrorHintsStaleProbe pins the safety hint emitted when the
+// probe gate has approved a bundle ID (Outcome == ProbeVended) but the daemon
+// nonetheless refuses to vend its sandbox at Open time. The most likely cause
+// is a stale probe — the user installed/uninstalled or re-signed the app
+// between `apps probe` and `apps clean` — so the error message MUST point them
+// back at `apps probe` and explain the staleness possibility. Production code
+// for this path lives in Task 10's Sandbox.Open error block; this test is a
+// characterization lock so a future copy-edit of the hint wording can't
+// silently regress the user-visible safety net.
+func TestAppsClean_openErrorHintsStaleProbe(t *testing.T) {
+	bang := errors.New("connect afc service failed")
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{Err: bang})
+	var stderr bytes.Buffer
+
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   new(bytes.Buffer),
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Store:    store,
+		Sandbox:  sb,
+		Prompter: ui.NewFakePrompter(nil),
+	}, []string{"--device", "U1", "com.example.app"})
+
+	if exit == 0 {
+		t.Errorf("exit = 0, want non-zero")
+	}
+	// Split into two checks so a future copy-edit of the exact hint wording
+	// doesn't silently break the safety hint. Both substrings together still
+	// guarantee the user sees the command name AND the staleness explanation.
+	if !strings.Contains(stderr.String(), "apps probe") {
+		t.Errorf("stderr should mention the apps probe command; got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stale") {
+		t.Errorf("stderr should explain the staleness possibility; got: %q", stderr.String())
+	}
+}
