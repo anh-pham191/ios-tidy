@@ -325,6 +325,10 @@ func runCrashlogsClean(ctx context.Context, deps runDeps, args []string) int {
 	// distinct so a future refactor that flattens the prompt block cannot
 	// silently invert the gate. Do not "simplify" by removing it.
 	if proceed {
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintf(deps.Stderr, "aborted: %v\n", err)
+			return 1
+		}
 		res, err := deps.Client.Remove(ctx, udid, f.pattern)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "remove crash logs: %v\n", err)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -303,5 +304,200 @@ func TestRunCrashlogsClean_successSummaryFormat(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout should be empty; got:\n%s", stdout.String())
+	}
+}
+
+func TestRunCrashlogsClean_promptYesProceedsRemoveCalledOnce(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		return crashlogs.RemoveResult{Removed: 1, Bytes: 1024}, nil
+	}
+	fp.ConfirmFn = func(ctx context.Context, q string) (bool, error) { return true, nil }
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(fc.RemoveCalls) != 1 {
+		t.Fatalf("RemoveCalls = %d, want 1", len(fc.RemoveCalls))
+	}
+}
+
+func TestRunCrashlogsClean_promptNoAbortsWithoutRemove(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		t.Fatalf("Remove must not be called when user answers 'n'")
+		return crashlogs.RemoveResult{}, nil
+	}
+	fp.ConfirmFn = func(ctx context.Context, q string) (bool, error) { return false, nil }
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(fc.RemoveCalls) != 0 {
+		t.Fatalf("RemoveCalls = %d, want 0", len(fc.RemoveCalls))
+	}
+	if !strings.Contains(stderr.String(), "Aborted.") {
+		t.Fatalf("stderr missing 'Aborted.'; got:\n%s", stderr.String())
+	}
+}
+
+func TestRunCrashlogsClean_promptEOFTreatedAsNo(t *testing.T) {
+	// Per ui.Prompter.Confirm contract (SHARED_CONTEXT.md §3): EOF returns
+	// (false, nil). clean must treat this exactly like "n".
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		t.Fatalf("Remove must not be called on EOF stdin")
+		return crashlogs.RemoveResult{}, nil
+	}
+	fp.ConfirmFn = func(ctx context.Context, q string) (bool, error) { return false, nil }
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(fc.RemoveCalls) != 0 {
+		t.Fatalf("RemoveCalls = %d, want 0 on EOF path", len(fc.RemoveCalls))
+	}
+	if !strings.Contains(stderr.String(), "Aborted.") {
+		t.Fatalf("stderr missing 'Aborted.' on EOF; got:\n%s", stderr.String())
+	}
+}
+
+func TestRunCrashlogsClean_partialFailureSummaryAndNonZeroExit(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{
+			{Path: "/a.ips", Size: 1024},
+			{Path: "/b.ips", Size: 2048},
+			{Path: "/c.ips", Size: 4096},
+		}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		return crashlogs.RemoveResult{
+			Removed: 2,
+			Bytes:   1024 + 2048,
+			Failures: []crashlogs.Failure{
+				{Path: "/c.ips", Err: errors.New("afc: permission denied")},
+			},
+		}, nil
+	}
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{"--yes"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (partial failure)", code)
+	}
+	body := stderr.String()
+	if !strings.Contains(body, "Deleted 2 of 3 files (3.1 KB freed). 1 failures.") {
+		t.Fatalf("stderr missing summary; got:\n%s", body)
+	}
+	if !strings.Contains(body, "/c.ips: afc: permission denied") {
+		t.Fatalf("stderr missing per-failure detail; got:\n%s", body)
+	}
+}
+
+func TestRunCrashlogsClean_cancelledContextAbortsBeforeRemove(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		t.Fatalf("Remove must not be called on cancelled context")
+		return crashlogs.RemoveResult{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled immediately
+	code := runCrashlogsClean(ctx, runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{"--yes"})
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero on cancelled context")
+	}
+	if len(fc.RemoveCalls) != 0 {
+		t.Fatalf("RemoveCalls = %d, want 0", len(fc.RemoveCalls))
+	}
+}
+
+func TestRunCrashlogsClean_listErrorExitsNonZeroAndDoesNotRemove(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return nil, errors.New("lockdown: connection refused")
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		t.Fatalf("Remove must not be called when List errored")
+		return crashlogs.RemoveResult{}, nil
+	}
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{})
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero")
+	}
+	if len(fc.RemoveCalls) != 0 {
+		t.Fatalf("RemoveCalls = %d, want 0", len(fc.RemoveCalls))
+	}
+	if !strings.Contains(stderr.String(), "list crash logs: lockdown: connection refused") {
+		t.Fatalf("stderr missing wrapped list error; got:\n%s", stderr.String())
+	}
+}
+
+func TestRunCrashlogsClean_removeWholeCallErrorExitsNonZero(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		return crashlogs.RemoveResult{}, errors.New("afc: service vanished")
+	}
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{"--yes"})
+	if code == 0 {
+		t.Fatalf("exit code = 0, want non-zero")
+	}
+	if !strings.Contains(stderr.String(), "remove crash logs: afc: service vanished") {
+		t.Fatalf("stderr missing wrapped remove error; got:\n%s", stderr.String())
 	}
 }
