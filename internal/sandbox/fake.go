@@ -61,18 +61,18 @@ func (s *FakeSandbox) Open(ctx context.Context, udid, bundleID string) (FS, erro
 // matrix tests assert "Remove was/wasn't called" without reaching into this
 // package later. WalkResults seeds Walk's iteration; ListResults seeds List.
 type FakeFS struct {
-	mu              sync.Mutex
-	CloseCalls      int
-	ListCalls       []string
-	StatCalls       []string
-	WalkCalls       []string
-	RemoveCalls     []string
-	RemoveAllCalls  []string
-	ListResults     map[string][]FileInfo
-	StatResults     map[string]FileInfo
-	WalkResults     map[string][]FileInfo
-	RemoveErr       error
-	RemoveAllErr    error
+	mu             sync.Mutex
+	CloseCalls     int
+	ListCalls      []string
+	StatCalls      []string
+	WalkCalls      []string
+	RemoveCalls    []string
+	RemoveAllCalls []string
+	ListResults    map[string][]FileInfo
+	StatResults    map[string]FileInfo
+	WalkResults    map[string][]FileInfo
+	RemoveErr      error
+	RemoveAllErr   error
 }
 
 func (f *FakeFS) List(_ context.Context, path string) ([]FileInfo, error) {
