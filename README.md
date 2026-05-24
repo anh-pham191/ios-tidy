@@ -274,6 +274,11 @@ Wire it into Claude Desktop and an LLM can drive `apps_probe` →
 `apps_clean --dry-run` → `apps_clean` (with explicit re-confirmation)
 the same way you would by hand.
 
+v0.3.0 adds a read-only guidance layer (`storage_recommendations`,
+`apps_offload_candidates`, `open_app_storage_settings`) that turns the
+raw tool outputs into a prioritised "what to free, how" plan and
+emits the iOS Settings deep-link URL for the manual offload step.
+
 Build:
 
 ```bash

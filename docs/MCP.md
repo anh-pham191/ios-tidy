@@ -47,9 +47,9 @@ which drops it in `$(go env GOPATH)/bin/ios-tidy-mcp`.
    `~` are not expanded by Claude Desktop's spawn path.
 4. Quit Claude Desktop fully (Cmd-Q, not just close the window) and
    reopen it.
-5. Verify: start a new chat, open the tools panel, and confirm the eight
-   `ios-tidy` tools are listed. If they are not, see Troubleshooting
-   below.
+5. Verify: start a new chat, open the tools panel, and confirm the
+   eleven `ios-tidy` tools are listed (plus `version`). If they are
+   not, see Troubleshooting below.
 
 ## Tool catalog
 
@@ -63,6 +63,30 @@ Read-only tools (no safety gating):
 - `apps_probe` — Probe one or more bundles to see whether
   `mobile_house_arrest` will vend their sandboxes. Persists results to
   the shared probe cache.
+
+Read-only guidance tools (v0.3.0; synthesis layer over the tools above):
+
+- `storage_recommendations` — Combine free-space, top apps, crashlog
+  total, and probe-cache state into a prioritised, human-actionable
+  plan. Includes a `notTouchable` disclosure block that enumerates the
+  data the host CANNOT clean (system caches, Safari/WebKit, Mail,
+  Photos, the iOS "Other" bucket, Music/Podcasts downloads). The LLM
+  caller should surface that block to the user so it does not promise
+  cleanups it cannot deliver. Recommended starting tool for "my
+  iPhone is full" requests.
+- `apps_offload_candidates` — Size-ranked third-party app list with
+  offload metadata. Smaller than `storage_recommendations` when you
+  only need the app size table. Filters `com.apple.*`. Falls back to
+  bundleID-ascending order with a stderr note when every reported
+  size is zero (cold installation_proxy after device boot).
+- `open_app_storage_settings` — Emits the iOS Settings deep-link URL
+  for Settings → General → iPhone Storage → `<app>` plus step-by-step
+  manual instructions. The tool CANNOT trigger Settings directly:
+  go-ios v1.0.213 exposes no OpenURL capability, and ios-tidy will
+  not launch arbitrary apps or send arbitrary URLs. Result `action`
+  is always `manual-required`; the URL format is hard-coded to
+  `prefs:root=STORAGE_MGMT_USAGE/<bundleID>`. Bundle ID must be
+  printable ASCII (homoglyph defence) and not `com.apple.*`.
 
 Destructive tools (each gated independently — see Safety model):
 
