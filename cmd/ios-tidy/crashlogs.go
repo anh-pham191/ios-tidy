@@ -37,7 +37,15 @@ func runCrashLogsList(ctx context.Context, deps runDeps, args []string) int {
 		patternFlag = fs.String("pattern", "*", "filepath.Match glob applied to filepath.Base of each path")
 		jsonFlag    = fs.Bool("json", false, "emit JSON instead of a table")
 	)
-	if err := fs.Parse(args); err != nil {
+	// Use splitFlagsAndPositionals so a stray positional doesn't silently
+	// truncate flag parsing. crashlogs list takes NO positionals; any
+	// extras are a usage error.
+	flagArgs, positionals := splitFlagsAndPositionals(fs, args)
+	if err := fs.Parse(flagArgs); err != nil {
+		return 2
+	}
+	if len(positionals) > 0 {
+		fmt.Fprintf(deps.Stderr, "crashlogs list: unexpected positional argument(s): %v\n", positionals)
 		return 2
 	}
 
@@ -133,7 +141,16 @@ func runCrashLogsPull(ctx context.Context, deps runDeps, args []string) int {
 		outFlag     = fs.String("out", "", "destination directory (required)")
 		forceFlag   = fs.Bool("force", false, "overwrite existing files without prompting")
 	)
-	if err := fs.Parse(args); err != nil {
+	// splitFlagsAndPositionals fixes the flag.Parse-stops-at-positional
+	// trap. crashlogs pull takes NO positionals today; any extra is a
+	// usage error so a future positional addition can't silently drop a
+	// trailing --force or --out.
+	flagArgs, positionals := splitFlagsAndPositionals(fs, args)
+	if err := fs.Parse(flagArgs); err != nil {
+		return 2
+	}
+	if len(positionals) > 0 {
+		fmt.Fprintf(deps.Stderr, "crashlogs pull: unexpected positional argument(s): %v\n", positionals)
 		return 2
 	}
 	if *outFlag == "" {
@@ -237,8 +254,16 @@ func parseCleanFlags(stderr io.Writer, args []string) (cleanFlags, error) {
 	fs.StringVar(&f.pattern, "pattern", "*", "filepath.Match glob applied to entry basenames")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "list matching entries and total bytes without deleting")
 	fs.BoolVar(&f.yes, "yes", false, "skip the interactive confirmation prompt (plan is still rendered)")
-	if err := fs.Parse(args); err != nil {
+	// splitFlagsAndPositionals fixes the flag.Parse-stops-at-positional
+	// trap. crashlogs clean takes NO positionals today; reject any
+	// stray ones so future additions can't silently drop a trailing flag.
+	flagArgs, positionals := splitFlagsAndPositionals(fs, args)
+	if err := fs.Parse(flagArgs); err != nil {
 		return cleanFlags{}, err
+	}
+	if len(positionals) > 0 {
+		fmt.Fprintf(stderr, "crashlogs clean: unexpected positional argument(s): %v\n", positionals)
+		return cleanFlags{}, fmt.Errorf("unexpected positional argument(s): %v", positionals)
 	}
 	return f, nil
 }

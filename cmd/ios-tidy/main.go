@@ -61,8 +61,15 @@ func dispatch(
 		fs.StringVar(&opts.Device, "device", "", "UDID to target; omit if exactly one device is connected")
 		fs.BoolVar(&opts.JSON, "json", false, "emit JSON instead of a table")
 		fs.IntVar(&opts.Limit, "limit", 0, "show only the top N apps by total bytes; 0 or negative means all")
-		if err := fs.Parse(args[1:]); err != nil {
+		// splitFlagsAndPositionals fixes the flag.Parse-stops-at-positional
+		// trap. storage takes NO positionals; any extras are a usage error.
+		flagArgs, positionals := splitFlagsAndPositionals(fs, args[1:])
+		if err := fs.Parse(flagArgs); err != nil {
 			return 2 // flag.ContinueOnError already wrote usage to errOut
+		}
+		if len(positionals) > 0 {
+			fmt.Fprintf(errOut, "storage: unexpected positional argument(s): %v\n", positionals)
+			return 2
 		}
 		sc := iosbackend.NewStorage()
 		al, _ := iosbackend.NewApps()

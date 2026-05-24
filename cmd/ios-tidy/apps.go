@@ -455,7 +455,16 @@ func runAppsList(ctx context.Context, deps appsDeps, args []string) int {
 		udidFlag = fs.String("device", "", "UDID of the target device (required if multiple connected)")
 		jsonFlag = fs.Bool("json", false, "emit JSON instead of a table")
 	)
-	if err := fs.Parse(args); err != nil {
+	// splitFlagsAndPositionals fixes the flag.Parse-stops-at-positional
+	// trap. apps list takes NO positionals today; any extras are a usage
+	// error so a future positional addition can't silently drop a trailing
+	// flag.
+	flagArgs, positionals := splitFlagsAndPositionals(fs, args)
+	if err := fs.Parse(flagArgs); err != nil {
+		return 2
+	}
+	if len(positionals) > 0 {
+		fmt.Fprintf(deps.Stderr, "apps list: unexpected positional argument(s): %v\n", positionals)
 		return 2
 	}
 
@@ -554,8 +563,16 @@ func (c *appsProbeCmd) run(ctx context.Context, args []string) error {
 	asJSON := fs.Bool("json", false, "Emit JSON instead of a table")
 	timeout := fs.Duration("timeout", 5*time.Second, "Per-probe timeout")
 	storeDir := fs.String("store-dir", "", "Override probe cache directory (default: user config dir). Mainly for tests.")
-	if err := fs.Parse(args); err != nil {
+	// splitFlagsAndPositionals fixes the flag.Parse-stops-at-positional
+	// trap. apps probe takes NO positionals (bundle IDs are --bundle
+	// FLAGS); any extras are a usage error.
+	flagArgs, positionals := splitFlagsAndPositionals(fs, args)
+	if err := fs.Parse(flagArgs); err != nil {
 		return err
+	}
+	if len(positionals) > 0 {
+		return fmt.Errorf("apps probe: unexpected positional argument(s): %v (did you mean --bundle %s?)",
+			positionals, positionals[0])
 	}
 
 	// Validation: exactly one of --all / --bundle.
