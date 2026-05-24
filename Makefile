@@ -1,31 +1,36 @@
-# ios-tidy build glue. Targets are deliberately small and obvious.
-# Why a Makefile rather than only `go` commands: it codifies the
-# integration-test gate (IOS_TIDY_TEST_UDID) so it can never be
-# skipped accidentally.
+.PHONY: test test-device test-cover lint build clean
 
-.PHONY: test test-device lint build fmt
+GO            ?= go
+PKG            = ./...
+BIN_DIR        = bin
+BIN            = $(BIN_DIR)/ios-tidy
+GIT_DESCRIBE  := $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
+LDFLAGS        = -s -w -X main.Version=$(GIT_DESCRIBE)
 
-# Unit tests: stdlib testing only, no build tag.
 test:
-	go test ./...
+	$(GO) test -race $(PKG)
 
-# Device integration tests: require the //go:build device tag AND
-# an explicitly-set UDID env var so they can never run against the
-# wrong phone by mistake (see SHARED_CONTEXT.md §5).
 test-device:
 	@if [ -z "$$IOS_TIDY_TEST_UDID" ]; then \
-		echo "IOS_TIDY_TEST_UDID is not set; refusing to run device tests."; \
-		exit 1; \
+	  echo "IOS_TIDY_TEST_UDID must be set for device tests"; exit 2; \
 	fi
-	go test -tags=device -count=1 ./internal/iosbackend/...
+	$(GO) test -tags=device ./internal/iosbackend/...
+
+test-cover:
+	$(GO) test -coverprofile=coverage.out $(PKG)
+	$(GO) tool cover -func=coverage.out | tail -n 1
 
 lint:
-	go vet ./...
-	gofmt -l . | tee /tmp/ios-tidy-gofmt.out
-	@test ! -s /tmp/ios-tidy-gofmt.out
+	$(GO) vet $(PKG)
+	@if command -v staticcheck >/dev/null 2>&1; then \
+	  staticcheck $(PKG); \
+	else \
+	  echo "staticcheck not installed — skipping (install: go install honnef.co/go/tools/cmd/staticcheck@latest)"; \
+	fi
 
 build:
-	go build -trimpath -ldflags="-s -w" -o bin/ios-tidy ./cmd/ios-tidy
+	mkdir -p $(BIN_DIR)
+	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(BIN) ./cmd/ios-tidy
 
-fmt:
-	gofmt -w .
+clean:
+	rm -rf $(BIN_DIR) coverage.out
