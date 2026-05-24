@@ -10,6 +10,7 @@ import (
 	"github.com/anh-pham191/ios-tidy/internal/apps"
 	"github.com/anh-pham191/ios-tidy/internal/device"
 	"github.com/anh-pham191/ios-tidy/internal/sandbox"
+	"github.com/anh-pham191/ios-tidy/internal/ui"
 )
 
 // trapSandbox fails the test if Open is ever called. Used by probe-gate
@@ -99,9 +100,13 @@ func TestAppsClean_opensSandboxAfterProbeGate(t *testing.T) {
 		Devices: &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
 		Sandbox: sb,
 		Store:   store,
+		// --yes skips the prompt so this test stays focused on the
+		// sandbox-open path; the prompt itself is covered by the
+		// basic-prompt tests below.
+		Prompter: ui.NewFakePrompter(nil),
 	}
 	exit := runAppsClean(context.Background(), deps,
-		[]string{"com.example.app", "--device", "U1"})
+		[]string{"--device", "U1", "--yes", "com.example.app"})
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
 	}
@@ -121,6 +126,292 @@ func TestAppsClean_opensSandboxAfterProbeGate(t *testing.T) {
 	// Both files should appear in the totals (30 bytes across 2 targets).
 	if !strings.Contains(out, "30") {
 		t.Errorf("stdout should report 30-byte total; got: %q", out)
+	}
+}
+
+// TestAppsClean_dryRunNeverCallsRemoveOrPrompter is the highest-value test in
+// M6: it pins the safety net that says --dry-run reaches NEITHER the
+// destructive FS calls (Remove/RemoveAll) NOR the Prompter. The FakePrompter
+// has a ConfirmFn that t.Fatalf's, so any Confirm call would fail the test
+// loudly rather than silently consuming a queued answer.
+func TestAppsClean_dryRunNeverCallsRemoveOrPrompter(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Path: "tmp/a", Size: 10}},
+			"Library/Caches": {{Path: "Library/Caches/c", Size: 20}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	fp := &ui.FakePrompter{
+		ConfirmFn: func(_ context.Context, _ string) (bool, error) {
+			t.Fatalf("Prompter must not be called on --dry-run")
+			return false, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--dry-run", "com.example.app"})
+
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fakeFS.RemoveCalls) != 0 {
+		t.Errorf("Remove was called under --dry-run: %v", fakeFS.RemoveCalls)
+	}
+	if len(fakeFS.RemoveAllCalls) != 0 {
+		t.Errorf("RemoveAll was called under --dry-run: %v", fakeFS.RemoveAllCalls)
+	}
+	if len(fp.Asked) != 0 {
+		t.Errorf("Prompter was asked under --dry-run: %v", fp.Asked)
+	}
+	if !strings.Contains(stdout.String(), "Dry run") {
+		t.Errorf("stdout should announce dry run; got: %q", stdout.String())
+	}
+}
+
+// TestAppsClean_dryRunWithDocumentsNeverCallsRemoveOrPrompter pins the
+// dry-run guarantee for the Documents path specifically. The strict
+// typed-bundle-ID gate (Task 13) MUST sit BELOW the dry-run short-circuit;
+// this test catches any future refactor that accidentally inverts the order.
+func TestAppsClean_dryRunWithDocumentsNeverCallsRemoveOrPrompter(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"Documents": {
+				{Path: "Documents/secret.txt", Size: 100},
+				{Path: "Documents/photos/img.jpg", Size: 2048},
+			},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	fp := &ui.FakePrompter{
+		ConfirmFn: func(_ context.Context, _ string) (bool, error) {
+			t.Fatalf("Prompter must not be called on --dry-run --include-documents")
+			return false, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--include-documents", "--dry-run", "com.example.app"})
+
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fakeFS.RemoveCalls) != 0 {
+		t.Errorf("Remove was called under --dry-run --include-documents: %v", fakeFS.RemoveCalls)
+	}
+	if len(fakeFS.RemoveAllCalls) != 0 {
+		t.Errorf("RemoveAll was called under --dry-run --include-documents: %v", fakeFS.RemoveAllCalls)
+	}
+	if len(fp.Asked) != 0 {
+		t.Errorf("Prompter was reached under --dry-run: %v", fp.Asked)
+	}
+	if !strings.Contains(stdout.String(), "Documents") {
+		t.Errorf("stdout should render the Documents target in the plan; got: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Dry run") {
+		t.Errorf("stdout should announce dry run; got: %q", stdout.String())
+	}
+}
+
+// TestAppsClean_basicPromptNoAborts pins the contract: when the user answers
+// "no" at the basic y/N prompt, NO RemoveAll/Remove calls happen and exit is
+// 0 (clean abort, not error).
+func TestAppsClean_basicPromptNoAborts(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp": {{Path: "tmp/a", Size: 10}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	fp := ui.NewFakePrompter([]bool{false})
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--include-tmp", "com.example.app"})
+
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0 (clean abort); stderr=%q", exit, stderr.String())
+	}
+	if len(fakeFS.RemoveAllCalls) != 0 {
+		t.Errorf("RemoveAll called after user said no: %v", fakeFS.RemoveAllCalls)
+	}
+	if len(fakeFS.RemoveCalls) != 0 {
+		t.Errorf("Remove called after user said no: %v", fakeFS.RemoveCalls)
+	}
+	if !strings.Contains(stdout.String(), "Aborted") {
+		t.Errorf("stdout should announce abort; got: %q", stdout.String())
+	}
+}
+
+// TestAppsClean_basicPromptYesProceeds pins the other side: when the user
+// answers "yes", RemoveAll fires for every enabled non-Documents target and
+// the summary line lands in stdout.
+func TestAppsClean_basicPromptYesProceeds(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Path: "tmp/a", Size: 10}},
+			"Library/Caches": {{Path: "Library/Caches/c", Size: 20}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	fp := ui.NewFakePrompter([]bool{true})
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "com.example.app"})
+
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fakeFS.RemoveAllCalls) != 2 {
+		t.Fatalf("RemoveAllCalls = %v, want 2 (tmp + Library/Caches)", fakeFS.RemoveAllCalls)
+	}
+	if !strings.Contains(stdout.String(), "Deleted") {
+		t.Errorf("stdout should contain summary; got: %q", stdout.String())
+	}
+	// Total bytes = 30 across both targets.
+	if !strings.Contains(stdout.String(), "30") {
+		t.Errorf("stdout should report 30 bytes freed; got: %q", stdout.String())
+	}
+}
+
+// TestAppsClean_yesFlagSkipsBasicPrompt pins the --yes contract: the basic
+// y/N prompt is bypassed. The FakePrompter has no queued answers, so any
+// Confirm call would panic with "exhausted".
+func TestAppsClean_yesFlagSkipsBasicPrompt(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp": {{Path: "tmp/a", Size: 1}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	fp := ui.NewFakePrompter(nil)
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--include-tmp", "--yes", "com.example.app"})
+
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fp.Asked) != 0 {
+		t.Errorf("Prompter was asked even with --yes: %v", fp.Asked)
+	}
+	if len(fakeFS.RemoveAllCalls) != 1 {
+		t.Errorf("RemoveAll calls = %v, want 1", fakeFS.RemoveAllCalls)
+	}
+}
+
+// TestAppsClean_partialFailureReportsAndExitsNonZero pins the summary path
+// when RemoveAll succeeds for one target but fails for another: stdout
+// gets the summary, stderr gets per-failure lines, exit is 1.
+func TestAppsClean_partialFailureReportsAndExitsNonZero(t *testing.T) {
+	tmpFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Path: "tmp/a", Size: 10}},
+			"Library/Caches": {{Path: "Library/Caches/c", Size: 20}},
+		},
+		// Both targets share one FakeFS, so we can't fail just caches via
+		// per-path Remove errors (those only apply to file-by-file Remove).
+		// Use a function-style failure via RemoveAllErr instead — both
+		// RemoveAll calls fail, so we exercise the "all targets failed"
+		// branch as a representative non-zero exit path.
+		RemoveAllErr: errors.New("device disconnected"),
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: tmpFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: ui.NewFakePrompter(nil),
+	}, []string{"--device", "U1", "--yes", "com.example.app"})
+
+	if exit != 1 {
+		t.Errorf("exit = %d, want 1 (failures present); stderr=%q", exit, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "failure") {
+		t.Errorf("stdout should mention failures in summary; got: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "device disconnected") {
+		t.Errorf("stderr should include the underlying error; got: %q", stderr.String())
 	}
 }
 

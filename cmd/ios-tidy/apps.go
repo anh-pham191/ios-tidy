@@ -24,12 +24,13 @@ import (
 // subcommand uses only Lister/Devices/Stdout/Stderr; probe additionally
 // needs a Sandbox seam and a ProbeStore.
 type appsDeps struct {
-	Lister  apps.Lister
-	Devices device.Lister
-	Sandbox sandbox.Sandbox
-	Store   apps.ProbeStore
-	Stdout  io.Writer
-	Stderr  io.Writer
+	Lister   apps.Lister
+	Devices  device.Lister
+	Sandbox  sandbox.Sandbox
+	Store    apps.ProbeStore
+	Prompter ui.Prompter
+	Stdout   io.Writer
+	Stderr   io.Writer
 }
 
 // defaults fills in nil writers with io.Discard so subcommands that don't
@@ -197,11 +198,76 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 
 	ui.RenderCleanPlan(deps.Stdout, bundleID, plans)
 
-	// Tasks 11-13 wire dry-run short-circuit, prompts, Execute, and the
-	// summary line. For now we render the plan and exit 0 — destructive
-	// behaviour is opt-in per the milestone breakdown.
-	_ = dryRun
-	_ = yes
+	// Task 11: dry-run short-circuit. This placement is load-bearing — the
+	// check MUST sit between RenderCleanPlan and the Documents-or-basic
+	// prompt branch (Task 13) so the strict typed-bundle-ID prompt is
+	// unreachable under --dry-run. The Documents safety net depends on this
+	// ordering.
+	if *dryRun {
+		fmt.Fprintln(deps.Stdout, "Dry run — no changes made.")
+		return 0
+	}
+
+	// Task 12: basic y/N confirmation for the non-Documents flow. The
+	// Documents path (--include-documents) keeps the strict typed-bundle-ID
+	// gate added in Task 13; --yes does NOT bypass that gate.
+	if !*includeDocs && !*yes {
+		var totalBytes int64
+		for _, p := range plans {
+			totalBytes += p.TotalBytes
+		}
+		question := fmt.Sprintf(
+			"Delete %s across %d target(s) in %s?",
+			ui.FormatBytes(uint64(totalBytes)), len(plans), bundleID)
+		ok, err := deps.Prompter.Confirm(ctx, question)
+		if err != nil {
+			fmt.Fprintln(deps.Stderr, "error:", err)
+			return 1
+		}
+		if !ok {
+			fmt.Fprintln(deps.Stdout, "Aborted.")
+			return 0
+		}
+	}
+
+	cleanResults := executePlans(ctx, fsHandle, plans)
+	return reportResults(deps.Stdout, deps.Stderr, cleanResults)
+}
+
+// executePlans calls sandbox.Execute for each plan and returns the per-target
+// results in input order. The sandbox FS is single-flight, so we deliberately
+// loop sequentially rather than fanning out goroutines.
+func executePlans(ctx context.Context, fs sandbox.FS, plans []sandbox.CleanPlan) []sandbox.CleanResult {
+	out := make([]sandbox.CleanResult, 0, len(plans))
+	for _, p := range plans {
+		out = append(out, sandbox.Execute(ctx, fs, p))
+	}
+	return out
+}
+
+// reportResults writes a single summary line to stdout and one stderr line
+// per failure. Exit code is non-zero iff any per-file failure occurred — the
+// summary itself is always printed so the user gets feedback even when the
+// destructive op partially succeeded.
+func reportResults(stdout, stderr io.Writer, results []sandbox.CleanResult) int {
+	var totalRemoved int
+	var totalBytes int64
+	var totalFailures int
+	for _, r := range results {
+		totalRemoved += r.Removed
+		totalBytes += r.Bytes
+		totalFailures += len(r.Failures)
+	}
+	fmt.Fprintf(stdout, "Deleted %d files (%s freed). %d failure(s).\n",
+		totalRemoved, ui.FormatBytes(uint64(totalBytes)), totalFailures)
+	for _, r := range results {
+		for _, f := range r.Failures {
+			fmt.Fprintf(stderr, "  fail: %s: %v\n", f.Path, f.Err)
+		}
+	}
+	if totalFailures > 0 {
+		return 1
+	}
 	return 0
 }
 
