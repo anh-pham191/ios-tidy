@@ -501,3 +501,30 @@ func TestRunCrashlogsClean_removeWholeCallErrorExitsNonZero(t *testing.T) {
 		t.Fatalf("stderr missing wrapped remove error; got:\n%s", stderr.String())
 	}
 }
+
+// TestRunCrashlogs_dispatchesCleanSubcommand pins that the top-level
+// `runCrashLogs` dispatcher routes `crashlogs clean` to runCrashlogsClean.
+// The empty-entries path is used as a cheap, side-effect-free probe: if
+// the dispatcher correctly forwards the call, we observe the
+// "No matching crash logs." notice that runCrashlogsClean emits when
+// Client.List returns nil entries. If the `clean` arm is removed or
+// misrouted, this test catches it.
+func TestRunCrashlogs_dispatchesCleanSubcommand(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return nil, nil
+	}
+	code := runCrashLogs(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{"clean"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (empty-entries path)", code)
+	}
+	if !strings.Contains(stderr.String(), "No matching crash logs.") {
+		t.Fatalf("stderr missing empty-entries notice; got:\n%s", stderr.String())
+	}
+}
