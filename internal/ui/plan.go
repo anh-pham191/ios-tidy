@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"io"
+
+	"github.com/anh-pham191/ios-tidy/internal/sandbox"
 )
 
 // Action is a single destructive operation to be displayed in a plan
@@ -36,4 +38,27 @@ func RenderPlan(out io.Writer, title string, actions []Action) (totalBytes int64
 	}
 	fmt.Fprintf(out, "Total: %d files, %s\n", len(actions), FormatBytes(uint64(totalBytes)))
 	return totalBytes
+}
+
+// RenderCleanPlan writes a multi-target sandbox-clean plan to w. Format:
+//
+//	Clean plan for <bundleID>:
+//	  <Target.Name>/  N files  X (human-readable)
+//	  ...
+//	Total: X across N target(s)
+//
+// This sits alongside RenderPlan (which is crash-log-shaped: one flat list
+// of paths) because the cleaner emits per-target groupings, not a single
+// path list. Keeping the format separate avoids fudging RenderPlan into a
+// dual-purpose helper whose callers each only want half its output.
+func RenderCleanPlan(w io.Writer, bundleID string, plans []sandbox.CleanPlan) {
+	fmt.Fprintf(w, "Clean plan for %s:\n", bundleID)
+	var total int64
+	for _, p := range plans {
+		fmt.Fprintf(w, "  %s/  %d files  %s\n",
+			p.Target.Name, len(p.Files), FormatBytes(uint64(p.TotalBytes)))
+		total += p.TotalBytes
+	}
+	fmt.Fprintf(w, "Total: %s across %d target(s)\n",
+		FormatBytes(uint64(total)), len(plans))
 }

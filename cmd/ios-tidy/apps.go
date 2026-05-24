@@ -44,12 +44,12 @@ func (d *appsDeps) defaults() {
 	}
 }
 
-// runApps is the top-level dispatcher for `ios-tidy apps {list|probe} ...`.
+// runApps is the top-level dispatcher for `ios-tidy apps {list|probe|clean} ...`.
 // Mirrors runCrashLogs in crashlogs.go: parse the sub-subcommand, route to
 // the appropriate handler, return the process exit code.
 func runApps(ctx context.Context, deps appsDeps, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(deps.Stderr, "usage: ios-tidy apps {list|probe} [flags]")
+		fmt.Fprintln(deps.Stderr, "usage: ios-tidy apps {list|probe|clean} [flags]")
 		return 2
 	}
 	switch args[0] {
@@ -67,10 +67,158 @@ func runApps(ctx context.Context, deps appsDeps, args []string) int {
 			return 1
 		}
 		return 0
+	case "clean":
+		return runAppsClean(ctx, deps, args[1:])
 	default:
 		fmt.Fprintf(deps.Stderr, "unknown apps subcommand: %q\n", args[0])
 		return 2
 	}
+}
+
+// runAppsClean implements `ios-tidy apps clean BUNDLE_ID [flags]`.
+//
+// This subcommand is the only destructive one in the `apps` family. It is
+// gated by a Vended probe result (Task 9) so we never attempt to open a
+// sandbox the daemon already told us it would refuse — that gate is the
+// difference between "polite question" and "wasted house_arrest dial".
+//
+// args is the slice AFTER "clean" — i.e. [BUNDLE_ID, flags...].
+func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
+	deps.defaults()
+	fs := flag.NewFlagSet("apps clean", flag.ContinueOnError)
+	fs.SetOutput(deps.Stderr)
+	var (
+		deviceFlag   = fs.String("device", "", "UDID of the target device (required if multiple connected)")
+		dryRun       = fs.Bool("dry-run", false, "Show what would be deleted; do not delete")
+		yes          = fs.Bool("yes", false, "Skip the basic y/N prompt (does NOT bypass the Documents typed-bundle-ID gate)")
+		includeDocs  = fs.Bool("include-documents", false, "Include the app's Documents/ folder (user data — requires typed-bundle-ID confirmation)")
+		includeTmp   = fs.Bool("include-tmp", false, "Include the app's tmp/ folder")
+		includeCache = fs.Bool("include-caches", false, "Include the app's Library/Caches/ folder")
+		storeDir     = fs.String("store-dir", "", "Override probe-store directory (mainly for tests)")
+	)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fmt.Fprintln(deps.Stderr, "usage: ios-tidy apps clean BUNDLE_ID [flags]")
+		return 2
+	}
+	bundleID := rest[0]
+
+	// Default include-flag combo: tmp + caches when none of --include-* set.
+	// Any explicit --include-* REPLACES the default (so passing only
+	// --include-documents means "Documents only" — exactly the contract the
+	// plan calls for in Task 8 step 3).
+	if !*includeTmp && !*includeCache && !*includeDocs {
+		*includeTmp = true
+		*includeCache = true
+	}
+
+	udid, err := resolveDevice(ctx, deps.Devices, *deviceFlag, deps.Stderr)
+	if err != nil {
+		return 1
+	}
+
+	// Task 9: probe gate. Load the per-UDID probe cache and refuse cleanly
+	// unless this bundle has a Vended outcome on record. The Store seam is
+	// lazily constructed (mirroring runAppsProbe) so `apps list` doesn't
+	// pay for a probes/ mkdir it doesn't need.
+	store := deps.Store
+	if store == nil {
+		dir := *storeDir
+		if dir == "" {
+			dir, err = defaultStoreDir()
+			if err != nil {
+				fmt.Fprintln(deps.Stderr, err)
+				return 1
+			}
+		} else if err := validateStoreDir(dir); err != nil {
+			fmt.Fprintln(deps.Stderr, err)
+			return 1
+		}
+		store = apps.NewFileProbeStore(dir)
+	}
+	results, err := store.Load(udid)
+	if err != nil {
+		fmt.Fprintf(deps.Stderr, "load probe store: %v\n", err)
+		return 1
+	}
+	if !probeVended(results, bundleID) {
+		fmt.Fprintf(deps.Stderr,
+			"error: bundle %q has not been confirmed as vended on device %s.\n"+
+				"Run `ios-tidy apps probe --bundle %s` first to check whether\n"+
+				"the device will let us touch this app's sandbox.\n",
+			bundleID, udid, bundleID)
+		return 1
+	}
+
+	// Task 10: open the sandbox and build per-target plans. The probe said
+	// Vended at some point in the past; if the daemon now refuses we treat
+	// the cached probe as stale and tell the user how to refresh it.
+	fsHandle, err := deps.Sandbox.Open(ctx, udid, bundleID)
+	if err != nil {
+		fmt.Fprintf(deps.Stderr,
+			"error: open sandbox for %q on %s: %v\n"+
+				"The probe store says this bundle was vended, but the daemon\n"+
+				"now refuses. The probe result may be stale; re-run\n"+
+				"  ios-tidy apps probe --bundle %s\n"+
+				"to refresh.\n",
+			bundleID, udid, err, bundleID)
+		return 1
+	}
+	defer fsHandle.Close()
+
+	var plans []sandbox.CleanPlan
+	addPlan := func(target sandbox.Target) bool {
+		p, err := sandbox.BuildPlan(ctx, fsHandle, target)
+		if err != nil {
+			fmt.Fprintf(deps.Stderr, "build plan for %s: %v\n", target.Name, err)
+			return false
+		}
+		plans = append(plans, p)
+		return true
+	}
+	if *includeTmp {
+		if !addPlan(sandbox.TargetTmp) {
+			return 1
+		}
+	}
+	if *includeCache {
+		if !addPlan(sandbox.TargetCaches) {
+			return 1
+		}
+	}
+	if *includeDocs {
+		if !addPlan(sandbox.TargetDocuments) {
+			return 1
+		}
+	}
+
+	ui.RenderCleanPlan(deps.Stdout, bundleID, plans)
+
+	// Tasks 11-13 wire dry-run short-circuit, prompts, Execute, and the
+	// summary line. For now we render the plan and exit 0 — destructive
+	// behaviour is opt-in per the milestone breakdown.
+	_ = dryRun
+	_ = yes
+	return 0
+}
+
+// probeVended reports whether results contains a ProbeVended outcome for
+// bundleID. The latest entry wins by iterating in order and tracking the
+// last match — Save() sorts by bundle ID, not by timestamp, so two probe
+// results for the same bundle won't co-exist in practice; we still scan
+// linearly to keep the implementation obvious.
+func probeVended(results []apps.ProbeResult, bundleID string) bool {
+	vended := false
+	for _, r := range results {
+		if r.BundleID != bundleID {
+			continue
+		}
+		vended = r.Outcome == apps.ProbeVended
+	}
+	return vended
 }
 
 // runAppsList implements `ios-tidy apps list`. Lists every user-installed app
