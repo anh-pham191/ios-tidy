@@ -67,10 +67,20 @@ func TestProbe_classifyErrors_table(t *testing.T) {
 		{"refused mixed case", "Connection Refused by daemon", ProbeRefused},
 		{"vendcontainer lowercase failed", "vendcontainer failed: policy mismatch", ProbeRefused},
 
-		// not-installed signals — outcome ProbeUnknown
+		// not-installed signals — outcome ProbeUnknown. Only the verbose
+		// "application not installed" phrasing counts; the bare
+		// "InstallationLookupFailed" code is a get-task-allow refusal
+		// from mobile_house_arrest on iOS 14+ (see probe.go file note,
+		// go-ios issue #593).
 		{"application not installed", "Application com.foo.bar not installed", ProbeUnknown},
-		{"installation lookup failed", "InstallationLookupFailed: bundle missing", ProbeUnknown},
 		{"app not installed lowercase", "application 'x' is not installed on device", ProbeUnknown},
+
+		// daemon refusal via the InstallationLookupFailed entitlement
+		// gate. Caller pre-verifies install, so this is policy-refusal,
+		// not missing-app. Plain "InstallationLookupFailed" with no
+		// "not installed" wording exercises this branch specifically.
+		{"installation lookup failed bare", "InstallationLookupFailed", ProbeRefused},
+		{"installation lookup failed wrapped", "house_arrest: InstallationLookupFailed", ProbeRefused},
 
 		// transport errors — ProbeError
 		{"tcc denied is transport not refusal", "pair-record path denied by TCC", ProbeError},

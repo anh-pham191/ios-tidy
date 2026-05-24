@@ -10,15 +10,25 @@ import (
 )
 
 // reNotInstalled fires when the daemon (or installation_proxy) tells us the
-// bundle isn't installed. Either form means "we cannot conclude anything
-// about the daemon's vending policy from this attempt".
+// bundle isn't installed. Means "we cannot conclude anything about the
+// daemon's vending policy from this attempt" — surface as ProbeUnknown.
 //
-// Patterns:
+// Pattern:
 //
 //	/application.*not installed/i  — matches "Application com.foo not installed",
 //	                                 "application 'x' is not installed on device", etc.
-//	InstallationLookupFailed       — substring match (case-sensitive: this is the
-//	                                 daemon's literal error code from go-ios).
+//
+// NOTE on "InstallationLookupFailed": this is the literal error string
+// mobile_house_arrest returns for VendContainer when the daemon's INTERNAL
+// installation_proxy lookup rejects the bundle. On iOS 14+ (verified iOS 26
+// on iPhone 15 Pro, 2026-05) the daemon applies a get-task-allow gate during
+// that lookup — vanilla App Store apps fail the gate and the daemon reports
+// "InstallationLookupFailed" even though installation_proxy.BrowseUserApps
+// returned the bundle just fine. This is functionally a daemon refusal, not
+// a missing-app signal. Both apps_probe call sites (cmd/ios-tidy-mcp/tools.go
+// and cmd/ios-tidy/apps.go) pre-verify the bundle is installed via Lister
+// BEFORE invoking Prober.Probe, so by the time we see this string here, the
+// app IS installed. Classify accordingly. See go-ios issue #593 and PR #612.
 var (
 	reNotInstalled       = regexp.MustCompile(`(?i)application.*not installed`)
 	reInstallationLookup = regexp.MustCompile(`InstallationLookupFailed`)
@@ -127,21 +137,27 @@ func (p *prober) Probe(ctx context.Context, udid, bundleID string) ProbeResult {
 
 // classifyErr maps a Sandbox.Open error message to a ProbeOutcome.
 // Order matters:
-//  1. "not installed" / InstallationLookupFailed → ProbeUnknown (the daemon
-//     sometimes phrases a missing app as "VendContainer failed: ... not installed").
+//  1. "not installed" (verbose form) → ProbeUnknown. The daemon sometimes
+//     phrases a missing app as "VendContainer failed: ... not installed".
 //  2. Transport / pairing-layer keywords → ProbeError (host-side problem; do
 //     NOT misclassify as a daemon refusal even if the string also matches
 //     reRefused's "denied"/"refused" alternation).
-//  3. Daemon-refusal keywords → ProbeRefused.
+//  3. Daemon-refusal keywords (including the bare "InstallationLookupFailed"
+//     string mobile_house_arrest returns when it rejects VendContainer under
+//     the iOS 14+ get-task-allow policy — see file-level note above).
+//     → ProbeRefused.
 //  4. Otherwise → ProbeError.
 func classifyErr(msg string) ProbeOutcome {
 	switch {
 	case reNotInstalled.MatchString(msg):
 		return ProbeUnknown
-	case reInstallationLookup.MatchString(msg):
-		return ProbeUnknown
 	case reTransport.MatchString(msg):
 		return ProbeError
+	case reInstallationLookup.MatchString(msg):
+		// Caller has already verified the bundle is installed via
+		// installation_proxy.BrowseUserApps, so this is a daemon-side
+		// policy refusal (get-task-allow gate), not a missing app.
+		return ProbeRefused
 	case reRefused.MatchString(msg):
 		return ProbeRefused
 	default:
