@@ -9,6 +9,7 @@ import (
 
 	"github.com/anh-pham191/ios-tidy/internal/device"
 	"github.com/anh-pham191/ios-tidy/internal/iosbackend"
+	"github.com/anh-pham191/ios-tidy/internal/ui"
 )
 
 func main() {
@@ -59,6 +60,13 @@ func dispatch(
 		sc := iosbackend.NewStorage()
 		al, _ := iosbackend.NewApps()
 		return runStorage(ctx, opts, lister, sc, al, out, errOut)
+	case "crashlogs":
+		deps := crashLogsDeps{
+			Lister:   lister,
+			Client:   iosbackend.NewCrashLogs(),
+			Prompter: ui.NewStdinPrompter(os.Stdin, errOut),
+		}
+		return runCrashLogs(ctx, deps, args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "ios-tidy: unknown subcommand %q\n", args[0])
 		printUsage(errOut)
@@ -72,6 +80,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "subcommands:")
 	fmt.Fprintln(w, "  devices    list connected iPhones")
 	fmt.Fprintln(w, "  storage    show device free/used + app sizes")
+	fmt.Fprintln(w, "  crashlogs  list and pull crash reports (read-only)")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "global flags:")
 	fmt.Fprintln(w, "  --version  print version and exit")
