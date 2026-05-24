@@ -4,12 +4,271 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anh-pham191/ios-tidy/internal/apps"
 	"github.com/anh-pham191/ios-tidy/internal/device"
+	"github.com/anh-pham191/ios-tidy/internal/sandbox"
 )
+
+// fakeProbeStore is an in-memory ProbeStore for command-level tests.
+type fakeProbeStore struct {
+	Saved     map[string][]apps.ProbeResult
+	SaveCalls int
+}
+
+func (f *fakeProbeStore) Save(udid string, r []apps.ProbeResult) error {
+	if f.Saved == nil {
+		f.Saved = map[string][]apps.ProbeResult{}
+	}
+	f.Saved[udid] = append([]apps.ProbeResult(nil), r...)
+	f.SaveCalls++
+	return nil
+}
+func (f *fakeProbeStore) Load(_ string) ([]apps.ProbeResult, error) { return nil, nil }
+
+func TestAppsProbe_requiresAllOrBundle(t *testing.T) {
+	cmd := newAppsProbeCmd(appsDeps{})
+	err := cmd.run(context.Background(), []string{"--device", "UDID"})
+	if err == nil || !strings.Contains(err.Error(), "--all") {
+		t.Fatalf("want error about missing --all/--bundle, got %v", err)
+	}
+}
+
+func TestAppsProbe_rejectsBothAllAndBundle(t *testing.T) {
+	cmd := newAppsProbeCmd(appsDeps{})
+	err := cmd.run(context.Background(), []string{"--device", "UDID", "--all", "--bundle", "com.foo"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("want mutually-exclusive error, got %v", err)
+	}
+}
+
+func TestAppsProbe_allProbesEveryUserApp(t *testing.T) {
+	lister := &apps.FakeLister{
+		Apps: []apps.App{
+			{BundleID: "com.a", Name: "A"},
+			{BundleID: "com.b", Name: "B"},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
+	sb.SetResponse("com.b", sandbox.FakeResponse{Err: errors.New("VendContainer failed: denied")})
+	store := &fakeProbeStore{}
+
+	var out bytes.Buffer
+	cmd := newAppsProbeCmd(appsDeps{
+		Lister:  lister,
+		Sandbox: sb,
+		Store:   store,
+		Stdout:  &out,
+	})
+	if err := cmd.run(context.Background(), []string{"--device", "UDID", "--all"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := sb.OpenCalls(); !slices.Equal(got, []string{"com.a", "com.b"}) {
+		t.Errorf("Open calls = %v, want [com.a com.b]", got)
+	}
+	if store.SaveCalls != 1 {
+		t.Errorf("SaveCalls = %d, want 1", store.SaveCalls)
+	}
+	saved := store.Saved["UDID"]
+	if len(saved) != 2 {
+		t.Fatalf("len(saved) = %d, want 2", len(saved))
+	}
+	gotByID := map[string]apps.ProbeOutcome{}
+	for _, r := range saved {
+		gotByID[r.BundleID] = r.Outcome
+	}
+	if gotByID["com.a"] != apps.ProbeVended {
+		t.Errorf("com.a outcome = %v, want Vended", gotByID["com.a"])
+	}
+	if gotByID["com.b"] != apps.ProbeRefused {
+		t.Errorf("com.b outcome = %v, want Refused", gotByID["com.b"])
+	}
+
+	tbl := out.String()
+	if !strings.Contains(tbl, "com.a") || !strings.Contains(tbl, "vended") {
+		t.Errorf("table missing com.a / vended:\n%s", tbl)
+	}
+	if !strings.Contains(tbl, "com.b") || !strings.Contains(tbl, "refused") {
+		t.Errorf("table missing com.b / refused:\n%s", tbl)
+	}
+}
+
+func TestAppsProbe_bundleFlagProbesExactlyThoseInOrder(t *testing.T) {
+	lister := &apps.FakeLister{
+		Apps: []apps.App{
+			{BundleID: "com.a"}, {BundleID: "com.b"}, {BundleID: "com.c"},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.c", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
+	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
+	store := &fakeProbeStore{}
+
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}})
+	if err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--bundle", "com.c", "--bundle", "com.a"},
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := sb.OpenCalls(); !slices.Equal(got, []string{"com.c", "com.a"}) {
+		t.Errorf("Open calls = %v, want [com.c com.a]", got)
+	}
+}
+
+func TestAppsProbe_bundleNotInstalledYieldsUnknown(t *testing.T) {
+	lister := &apps.FakeLister{
+		Apps: []apps.App{{BundleID: "com.installed"}},
+	}
+	sb := sandbox.NewFakeSandbox()
+	store := &fakeProbeStore{}
+
+	var out bytes.Buffer
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &out})
+	if err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--bundle", "com.ghost"},
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(sb.OpenCalls()) != 0 {
+		t.Errorf("Open should not have been called for non-installed bundle; calls = %v", sb.OpenCalls())
+	}
+	saved := store.Saved["UDID"]
+	if len(saved) != 1 || saved[0].Outcome != apps.ProbeUnknown {
+		t.Errorf("saved = %v, want one ProbeUnknown row", saved)
+	}
+	if !strings.Contains(saved[0].Detail, "not installed") {
+		t.Errorf("Detail = %q, want it to mention 'not installed'", saved[0].Detail)
+	}
+}
+
+func TestAppsProbe_timeoutFlagAppliedPerProbe(t *testing.T) {
+	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.hang"}}}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.hang", sandbox.FakeResponse{Hang: true})
+	store := &fakeProbeStore{}
+
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}})
+	start := time.Now()
+	if err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--all", "--timeout", "30ms"},
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("probe didn't honour --timeout 30ms; took %v", elapsed)
+	}
+
+	saved := store.Saved["UDID"]
+	if len(saved) != 1 {
+		t.Fatalf("saved len = %d, want 1", len(saved))
+	}
+	if saved[0].Outcome != apps.ProbeError {
+		t.Errorf("Outcome = %v, want ProbeError", saved[0].Outcome)
+	}
+	if !strings.Contains(saved[0].Detail, "timeout") {
+		t.Errorf("Detail = %q, want it to contain 'timeout'", saved[0].Detail)
+	}
+}
+
+func TestAppsProbe_storeDirOverrideHonoured(t *testing.T) {
+	// t.TempDir() returns a path under os.TempDir(), which is allow-listed
+	// by validateStoreDir — no IOS_TIDY_ALLOW_STORE_DIR escape hatch needed.
+	dir := t.TempDir()
+	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.a"}}}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
+
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}})
+	if err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--all", "--store-dir", dir},
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "UDID.json")); err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+}
+
+func TestAppsProbe_storeDirRejectsUnsafePath(t *testing.T) {
+	t.Setenv("IOS_TIDY_ALLOW_STORE_DIR", "")
+
+	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.a"}}}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
+
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}})
+	err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--all", "--store-dir", "/"},
+	)
+	if err == nil {
+		t.Fatal("run: err = nil; want a --store-dir validation error")
+	}
+	if !strings.Contains(err.Error(), "--store-dir") {
+		t.Errorf("err = %q; want mention of --store-dir", err.Error())
+	}
+}
+
+func TestAppsProbe_storeDirEscapeHatchAllowsAnyPath(t *testing.T) {
+	t.Setenv("IOS_TIDY_ALLOW_STORE_DIR", "1")
+	dir := t.TempDir()
+	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.a"}}}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
+
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}})
+	if err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--all", "--store-dir", dir},
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+func TestAppsProbe_jsonOutputShape(t *testing.T) {
+	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.a", Name: "A"}}}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
+	store := &fakeProbeStore{}
+
+	var out bytes.Buffer
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &out})
+	if err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--all", "--json"},
+	); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, out.String())
+	}
+	if len(rows) != 1 || rows[0]["bundleID"] != "com.a" || rows[0]["outcome"] != "vended" {
+		t.Errorf("rows = %v", rows)
+	}
+}
+
+func TestAppsProbe_exitsZeroEvenIfAllRefused(t *testing.T) {
+	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.a"}}}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.a", sandbox.FakeResponse{Err: errors.New("VendContainer failed: denied")})
+	store := &fakeProbeStore{}
+
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}})
+	if err := cmd.run(context.Background(), []string{"--device", "UDID", "--all"}); err != nil {
+		t.Errorf("run returned error, want nil even for ProbeRefused: %v", err)
+	}
+}
 
 // TestAppsList_tableSortedDesc verifies the table output is sorted descending
 // by total bytes (DynamicBytes + StaticBytes) and contains NO device summary
@@ -101,15 +360,18 @@ func TestRunApps_dispatchListAndProbe(t *testing.T) {
 		}
 	})
 
-	t.Run("probe not implemented yet", func(t *testing.T) {
+	t.Run("probe routes to runAppsProbe", func(t *testing.T) {
+		// With no --all / --bundle, probe must surface a validation error
+		// (exit 1) — proving the dispatcher reached the real handler rather
+		// than the old "not implemented" stub.
 		var stdout, stderr bytes.Buffer
 		deps := appsDeps{Lister: lister, Devices: devs, Stdout: &stdout, Stderr: &stderr}
-		exit := runApps(context.Background(), deps, []string{"probe"})
-		if exit != 2 {
-			t.Errorf("probe exit = %d, want 2 (not implemented yet); stderr=%s", exit, stderr.String())
+		exit := runApps(context.Background(), deps, []string{"probe", "--device", "UDID"})
+		if exit != 1 {
+			t.Errorf("probe exit = %d, want 1 (validation error); stderr=%s", exit, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "not implemented") {
-			t.Errorf("expected 'not implemented' in stderr, got: %q", stderr.String())
+		if !strings.Contains(stderr.String(), "--all") {
+			t.Errorf("expected '--all' guidance in stderr, got: %q", stderr.String())
 		}
 	})
 

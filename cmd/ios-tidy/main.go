@@ -74,8 +74,13 @@ func dispatch(
 		deps := appsDeps{
 			Lister:  al,
 			Devices: lister,
-			Stdout:  out,
-			Stderr:  errOut,
+			Sandbox: iosbackend.NewSandbox(),
+			// Store left nil — the probe subcommand builds a FileProbeStore
+			// from --store-dir or the default user config dir. Leaving Store
+			// nil keeps `apps list` from paying for a probes/ mkdir it
+			// doesn't use.
+			Stdout: out,
+			Stderr: errOut,
 		}
 		return runApps(ctx, deps, args[1:])
 	default:
