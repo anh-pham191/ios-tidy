@@ -652,11 +652,100 @@ Returns:
 //   - confirmed: DryRun=false; Deleted/Bytes/Failures populated; WouldDelete/Sample zero.
 type crashlogsCleanResult struct {
 	DryRun      bool                `json:"dryRun"`
+	Device      deviceRef           `json:"device"`
 	WouldDelete int                 `json:"wouldDelete,omitempty"`
 	Sample      []string            `json:"sample,omitempty"`
 	Deleted     int                 `json:"deleted,omitempty"`
 	Bytes       int64               `json:"bytes"`
 	Failures    []crashlogs.Failure `json:"failures,omitempty"`
+}
+
+// deviceRef is a compact UDID+name pair stamped into every destructive
+// tool's JSON result. The name comes from the same lookup the device
+// picker would surface; if the lister is unable to recover it (e.g. an
+// untrusted device with no readable lockdown values), Name is the empty
+// string and the caller still sees the UDID.
+//
+// Echoing the friendly name closes a confused-deputy gap: an LLM caller
+// that resolves "Anh's iPhone 14 Pro" to a UDID via devices_list can now
+// confirm that the destructive op landed on the same device, not a
+// substituted one a prompt-injection has slipped into a tool argument.
+type deviceRef struct {
+	UDID string `json:"udid"`
+	Name string `json:"name"`
+}
+
+// resolveDeviceRef returns (udid, name, resolved). It mirrors
+// resolveDeviceForTool but also looks up the friendly name from the
+// lister's List output. The MCP layer pays the cost of a second List
+// call so that destructive tool results can echo the device name without
+// changing cmdutil.ResolveDevice's signature (CLI does not need this).
+//
+// When the lister cannot enumerate (the override-path fallback in
+// cmdutil.ResolveDevice), Name is left empty — UDID is still returned so
+// the caller can correlate by the canonical identifier.
+func resolveDeviceRef(ctx context.Context, deps serverDeps, override string) (string, string, *mcp.CallToolResult) {
+	udid, resolved := resolveDeviceForTool(ctx, deps, override)
+	if resolved != nil {
+		return "", "", resolved
+	}
+	name := ""
+	if deps.Lister != nil {
+		if devs, err := deps.Lister.List(ctx); err == nil {
+			for _, d := range devs {
+				if d.UDID == udid {
+					name = d.Name
+					break
+				}
+			}
+		}
+	}
+	return udid, name, nil
+}
+
+// isPrintableASCII reports whether every rune in s is in the printable
+// ASCII range [0x20, 0x7E]. Apple bundle IDs are reverse-DNS; the rule
+// is "ASCII letters, digits, hyphen, and dot". Anything outside that
+// strict range (Cyrillic homoglyphs, NULs, RTL overrides, smart quotes)
+// is either a typo or an injection attempt — refuse before any device
+// I/O so the gate cannot be tricked by a Unicode lookalike of the
+// expected bundle ID.
+func isPrintableASCII(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r > 0x7E {
+			return false
+		}
+	}
+	return true
+}
+
+// firstNonASCIIRune returns the first non-printable-ASCII rune in s,
+// suitable for embedding in an error message with %U so the caller (and
+// auditor) sees exactly which codepoint triggered the refusal.
+func firstNonASCIIRune(s string) rune {
+	for _, r := range s {
+		if r < 0x20 || r > 0x7E {
+			return r
+		}
+	}
+	return 0
+}
+
+// dryRunArgConservative reads dry_run from the request without using
+// mcp-go's GetBool, which coerces the JSON string "false" to bool false
+// via strconv.ParseBool. For a destructive tool the safe behaviour is:
+// missing → true, real bool → its value, anything else (string, number,
+// null) → true. There is no scenario where a non-bool dry_run should
+// silently disarm the default.
+func dryRunArgConservative(req mcp.CallToolRequest) bool {
+	v, ok := req.GetArguments()["dry_run"]
+	if !ok {
+		return true
+	}
+	if b, isBool := v.(bool); isBool {
+		return b
+	}
+	return true
 }
 
 // newCrashLogsCleanHandler returns the handler for crashlogs_clean. Default
@@ -667,10 +756,11 @@ func newCrashLogsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 		pattern := req.GetString("pattern", "*")
 		confirm := req.GetBool("confirm", false)
 
-		udid, resolved := resolveDeviceForTool(ctx, deps, override)
+		udid, devName, resolved := resolveDeviceRef(ctx, deps, override)
 		if resolved != nil {
 			return resolved, nil
 		}
+		devRef := deviceRef{UDID: udid, Name: devName}
 
 		if !confirm {
 			entries, err := deps.CrashLogs.List(ctx, udid, pattern)
@@ -691,6 +781,7 @@ func newCrashLogsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 			}
 			return jsonResult(crashlogsCleanResult{
 				DryRun:      true,
+				Device:      devRef,
 				WouldDelete: len(entries),
 				Bytes:       bytes,
 				Sample:      sample,
@@ -703,6 +794,7 @@ func newCrashLogsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 		}
 		return jsonResult(crashlogsCleanResult{
 			DryRun:   false,
+			Device:   devRef,
 			Deleted:  res.Removed,
 			Bytes:    res.Bytes,
 			Failures: res.Failures,
@@ -715,6 +807,7 @@ type crashlogsPullResult struct {
 	Pulled   int                 `json:"pulled"`
 	Bytes    int64               `json:"bytes"`
 	Dest     string              `json:"dest"`
+	Device   deviceRef           `json:"device"`
 	Failures []crashlogs.Failure `json:"failures,omitempty"`
 }
 
@@ -766,7 +859,7 @@ func newCrashLogsPullHandler(deps serverDeps) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		udid, resolved := resolveDeviceForTool(ctx, deps, override)
+		udid, devName, resolved := resolveDeviceRef(ctx, deps, override)
 		if resolved != nil {
 			return resolved, nil
 		}
@@ -779,6 +872,7 @@ func newCrashLogsPullHandler(deps serverDeps) server.ToolHandlerFunc {
 			Pulled:   res.Pulled,
 			Bytes:    res.Bytes,
 			Dest:     out,
+			Device:   deviceRef{UDID: udid, Name: devName},
 			Failures: res.Failures,
 		})
 	}
@@ -795,6 +889,7 @@ type appsCleanPlanRow struct {
 // appsCleanDryRunResult is the wire-level shape for dry-run apps_clean output.
 type appsCleanDryRunResult struct {
 	DryRun     bool               `json:"dryRun"`
+	Device     deviceRef          `json:"device"`
 	BundleID   string             `json:"bundleID"`
 	Plans      []appsCleanPlanRow `json:"plans"`
 	TotalBytes int64              `json:"totalBytes"`
@@ -811,6 +906,7 @@ type appsCleanResultRow struct {
 // appsCleanConfirmedResult is the wire-level shape for confirmed apps_clean output.
 type appsCleanConfirmedResult struct {
 	DryRun          bool                 `json:"dryRun"`
+	Device          deviceRef            `json:"device"`
 	BundleID        string               `json:"bundleID"`
 	Results         []appsCleanResultRow `json:"results"`
 	TotalBytesFreed int64                `json:"totalBytesFreed"`
@@ -853,15 +949,36 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 		includeCaches := req.GetBool("include_caches", false)
 		includeDocs := req.GetBool("include_documents", false)
 		ackDocs := req.GetBool("i_understand_documents_are_unrecoverable", false)
-		// dry_run defaults to TRUE — the safe default. We cannot rely on
-		// GetBool's defaultValue to express "missing == true" because callers
-		// will sometimes pass dry_run=false explicitly; that path must
-		// activate destructive intent. So: missing → true; present-and-true → true;
-		// present-and-false → false. GetBool(name, true) gives us exactly that.
-		dryRun := req.GetBool("dry_run", true)
+		// dry_run defaults to TRUE — the safe default. mcp-go's GetBool
+		// coerces JSON strings via strconv.ParseBool (verified against
+		// v0.54.0/mcp/tools.go), so dry_run: "false" (string) would
+		// silently disarm via the typed accessor. Use a conservative
+		// reader that ONLY accepts a real bool; anything else (string,
+		// number, null) falls back to the safe default of true.
+		dryRun := dryRunArgConservative(req)
 
 		if bundleID == "" {
 			return mcp.NewToolResultError("apps_clean: bundle_id is required"), nil
+		}
+
+		// H-1: refuse non-printable-ASCII in bundle_id and confirm_bundle_id.
+		// A Cyrillic 'а' (U+0430) is byte-different from ASCII 'a' but renders
+		// identically; if both bundle_id and confirm_bundle_id share the same
+		// homoglyph the typed-bundle-ID gate passes by string equality while
+		// the destructive op targets a different (or non-existent) bundle.
+		// Apple bundle IDs are reverse-DNS, always printable ASCII.
+		if !isPrintableASCII(bundleID) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"apps_clean: bundle_id contains non-printable-ASCII rune %U; refusing for safety. "+
+					"Apple bundle IDs are reverse-DNS (ASCII letters, digits, '-', '.').",
+				firstNonASCIIRune(bundleID),
+			)), nil
+		}
+		if confirmBundleID != "" && !isPrintableASCII(confirmBundleID) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"apps_clean: confirm_bundle_id contains non-printable-ASCII rune %U; refusing for safety.",
+				firstNonASCIIRune(confirmBundleID),
+			)), nil
 		}
 
 		// Default include-flag combo: tmp + caches when none of include_* set.
@@ -887,10 +1004,11 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 			}
 		}
 
-		udid, resolved := resolveDeviceForTool(ctx, deps, override)
+		udid, devName, resolved := resolveDeviceRef(ctx, deps, override)
 		if resolved != nil {
 			return resolved, nil
 		}
+		devRef := deviceRef{UDID: udid, Name: devName}
 
 		// Probe gate. Refuse unless the bundle has a Vended probe on record.
 		if deps.ProbeStore == nil {
@@ -965,6 +1083,7 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 			}
 			return jsonResult(appsCleanDryRunResult{
 				DryRun:     true,
+				Device:     devRef,
 				BundleID:   bundleID,
 				Plans:      rows,
 				TotalBytes: total,
@@ -987,6 +1106,7 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 		}
 		return jsonResult(appsCleanConfirmedResult{
 			DryRun:          false,
+			Device:          devRef,
 			BundleID:        bundleID,
 			Results:         resultRows,
 			TotalBytesFreed: totalFreed,

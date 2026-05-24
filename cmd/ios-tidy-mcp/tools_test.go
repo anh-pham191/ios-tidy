@@ -775,6 +775,324 @@ func TestAppsClean_probeGate_noVended(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------
+// H-1: ASCII-only bundle_id / confirm_bundle_id
+// ----------------------------------------------------------------------
+
+// TestAppsClean_rejectsBundleIDWithNonASCII pins the homograph defence.
+// The Cyrillic 'а' (U+0430) renders identically to ASCII 'a' but is
+// byte-different; without a strict-ASCII check the typed-bundle-ID gate
+// would pass on a homoglyph pair and the destructive op would target an
+// app that doesn't exist (or, worse, a different one). The handler must
+// refuse before any device I/O and never reach Sandbox.Open.
+func TestAppsClean_rejectsBundleIDWithNonASCII(t *testing.T) {
+	fakeFS, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	// Replace sandbox with a trap so a regression that bypasses the
+	// ASCII gate is caught loudly instead of returning a misleading
+	// "no plan" success.
+	deps.Sandbox = &trapSandbox{t: t}
+	h := newAppsCleanHandler(deps)
+
+	// "com.exаmple.app" — the third character is Cyrillic 'а' (U+0430).
+	cyrillicBundle := "com.exаmple.app"
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         cyrillicBundle,
+		"confirm_bundle_id": cyrillicBundle,
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for non-ASCII bundle_id; got: %s", extractText(res))
+	}
+	if !strings.Contains(extractText(res), "non-printable-ASCII") {
+		t.Errorf("expected error to mention non-printable-ASCII; got: %s", extractText(res))
+	}
+	if len(fakeFS.RemoveCalls) != 0 || len(fakeFS.RemoveAllCalls) != 0 {
+		t.Errorf("Execute must not be called on non-ASCII bundle_id")
+	}
+}
+
+// TestAppsClean_rejectsBundleIDWithControlChar pins that an embedded
+// control character (NUL here) is also refused. Stops a caller from
+// smuggling a null-terminator past a downstream consumer that does C
+// string handling.
+func TestAppsClean_rejectsBundleIDWithControlChar(t *testing.T) {
+	_, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	deps.Sandbox = &trapSandbox{t: t}
+	h := newAppsCleanHandler(deps)
+
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app\x00",
+		"confirm_bundle_id": "com.example.app\x00",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for NUL byte in bundle_id; got: %s", extractText(res))
+	}
+}
+
+// TestAppsClean_rejectsConfirmBundleIDWithNonASCII pins the other half of
+// the homograph defence: only confirm_bundle_id contains the lookalike.
+// The TrimSpace+equality check between bundle_id and confirm_bundle_id is
+// reached only AFTER ASCII validation, so a homoglyph in just the confirm
+// field is still refused at the ASCII layer.
+func TestAppsClean_rejectsConfirmBundleIDWithNonASCII(t *testing.T) {
+	_, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	deps.Sandbox = &trapSandbox{t: t}
+	h := newAppsCleanHandler(deps)
+
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.exаmple.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for non-ASCII confirm_bundle_id; got: %s", extractText(res))
+	}
+}
+
+// TestAppsClean_acceptsValidASCII is the sanity check that ordinary
+// reverse-DNS bundle IDs still proceed through the gate.
+func TestAppsClean_acceptsValidASCII(t *testing.T) {
+	fakeFS, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("ASCII bundle_id should proceed; got error: %s", extractText(res))
+	}
+	if len(fakeFS.RemoveAllCalls) != 2 {
+		t.Errorf("expected tmp+caches Execute under default include combo; got RemoveAllCalls=%v", fakeFS.RemoveAllCalls)
+	}
+}
+
+// ----------------------------------------------------------------------
+// M-1: dry_run string coercion contract
+// ----------------------------------------------------------------------
+
+// TestAppsClean_dryRunStringFalseDoesNotDisarm pins the conservative
+// contract: a JSON STRING "false" for dry_run MUST NOT activate the
+// destructive path. mcp-go's GetBool coerces strings via
+// strconv.ParseBool, so the handler reads dry_run with a typed-only
+// reader (dryRunArgConservative) that treats anything other than a real
+// bool as the safe default (true).
+//
+// If this test fails, the handler will have gone destructive on a string
+// argument — a meaningful safety regression. The fix is to keep using
+// dryRunArgConservative (NOT req.GetBool).
+func TestAppsClean_dryRunStringFalseDoesNotDisarm(t *testing.T) {
+	fakeFS, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	h := newAppsCleanHandler(deps)
+
+	// Note: arguments map carries the JSON STRING "false", not bool false.
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           "false",
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("unexpected error result: %s", extractText(res))
+	}
+	text := extractText(res)
+	if !strings.Contains(text, `"dryRun": true`) {
+		t.Errorf("dry_run string \"false\" must NOT disarm; expected dryRun=true. Got: %s", text)
+	}
+	if len(fakeFS.RemoveCalls) != 0 || len(fakeFS.RemoveAllCalls) != 0 {
+		t.Errorf("Execute must not be called when dry_run is a string. Got Removes=%v RemoveAll=%v", fakeFS.RemoveCalls, fakeFS.RemoveAllCalls)
+	}
+}
+
+// TestAppsClean_dryRunNumberZeroDoesNotDisarm pins the same contract for
+// a numeric 0 — mcp-go's GetBool would coerce 0 → false; we explicitly
+// reject any non-bool.
+func TestAppsClean_dryRunNumberZeroDoesNotDisarm(t *testing.T) {
+	fakeFS, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	h := newAppsCleanHandler(deps)
+
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           float64(0), // JSON numbers decode to float64
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !strings.Contains(extractText(res), `"dryRun": true`) {
+		t.Errorf("dry_run numeric 0 must NOT disarm; got: %s", extractText(res))
+	}
+	if len(fakeFS.RemoveCalls) != 0 || len(fakeFS.RemoveAllCalls) != 0 {
+		t.Errorf("Execute must not be called when dry_run is a number")
+	}
+}
+
+// TestAppsClean_dryRunBoolFalseDisarms is the positive control: a REAL
+// bool false MUST still flip to destructive (assuming all other gates
+// clear). Stops a paranoid implementation that just refuses every
+// non-default dry_run.
+func TestAppsClean_dryRunBoolFalseDisarms(t *testing.T) {
+	fakeFS, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false, // real bool
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("unexpected error result: %s", extractText(res))
+	}
+	if len(fakeFS.RemoveAllCalls) != 2 {
+		t.Errorf("real bool false must reach Execute; got RemoveAllCalls=%v", fakeFS.RemoveAllCalls)
+	}
+}
+
+// ----------------------------------------------------------------------
+// M-4: destructive tool results echo device.name
+// ----------------------------------------------------------------------
+
+func TestAppsClean_resultIncludesDeviceName(t *testing.T) {
+	fakeFS, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	// Override the lister to populate Name as well as UDID.
+	deps.Lister = &device.FakeLister{Devices: []device.Device{
+		{UDID: "U1", Name: "Anh's iPhone 14 Pro"},
+	}}
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("unexpected error result: %s", extractText(res))
+	}
+	text := extractText(res)
+	if !strings.Contains(text, `"name": "Anh's iPhone 14 Pro"`) {
+		t.Errorf("expected device.name in result JSON; got: %s", text)
+	}
+	if !strings.Contains(text, `"udid": "U1"`) {
+		t.Errorf("expected device.udid in result JSON; got: %s", text)
+	}
+	_ = fakeFS // silence unused warning when only checking text
+}
+
+func TestAppsClean_dryRunResultIncludesDeviceName(t *testing.T) {
+	_, sb, store := appsCleanFixture()
+	deps := newAppsCleanDeps(sb, store)
+	deps.Lister = &device.FakeLister{Devices: []device.Device{
+		{UDID: "U1", Name: "My Phone"},
+	}}
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id": "com.example.app",
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	text := extractText(res)
+	if !strings.Contains(text, `"name": "My Phone"`) {
+		t.Errorf("dry-run result must include device.name; got: %s", text)
+	}
+}
+
+func TestCrashLogsClean_resultIncludesDeviceName(t *testing.T) {
+	fc := &crashlogs.FakeClient{
+		ListEntries: []crashlogs.Entry{{Path: "/a.ips", Size: 10}},
+	}
+	deps := serverDeps{
+		Lister: &device.FakeLister{Devices: []device.Device{
+			{UDID: "U1", Name: "Phone A"},
+		}},
+		CrashLogs: fc,
+	}
+	h := newCrashLogsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(nil))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	text := extractText(res)
+	if !strings.Contains(text, `"name": "Phone A"`) {
+		t.Errorf("crashlogs_clean dry-run result must include device.name; got: %s", text)
+	}
+}
+
+func TestCrashLogsClean_confirmedResultIncludesDeviceName(t *testing.T) {
+	fc := &crashlogs.FakeClient{
+		ListEntries:  []crashlogs.Entry{{Path: "/a.ips", Size: 10}},
+		RemoveResult: crashlogs.RemoveResult{Removed: 1, Bytes: 10},
+	}
+	deps := serverDeps{
+		Lister: &device.FakeLister{Devices: []device.Device{
+			{UDID: "U1", Name: "Phone A"},
+		}},
+		CrashLogs: fc,
+	}
+	h := newCrashLogsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"confirm": true,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	text := extractText(res)
+	if !strings.Contains(text, `"name": "Phone A"`) {
+		t.Errorf("crashlogs_clean confirmed result must include device.name; got: %s", text)
+	}
+}
+
+func TestCrashLogsPull_resultIncludesDeviceName(t *testing.T) {
+	tmp := t.TempDir()
+	fc := &crashlogs.FakeClient{
+		PullResult: crashlogs.PullResult{Pulled: 1, Bytes: 1},
+	}
+	deps := serverDeps{
+		Lister: &device.FakeLister{Devices: []device.Device{
+			{UDID: "U1", Name: "Pulled Phone"},
+		}},
+		CrashLogs: fc,
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": tmp,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	text := extractText(res)
+	if !strings.Contains(text, `"name": "Pulled Phone"`) {
+		t.Errorf("crashlogs_pull result must include device.name; got: %s", text)
+	}
+}
+
 func TestAppsClean_probeGate_neverProbed(t *testing.T) {
 	store := &loadingProbeStore{Results: map[string][]apps.ProbeResult{}}
 	deps := serverDeps{
