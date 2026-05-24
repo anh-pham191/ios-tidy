@@ -38,6 +38,26 @@ func TestFakePrompter_returnsQueuedAnswersInOrder(t *testing.T) {
 	}
 }
 
+func TestFakePrompter_ConfirmFnTakesPrecedenceOverQueue(t *testing.T) {
+	fp := NewFakePrompter([]bool{true}) // queue should be ignored
+	fp.ConfirmFn = func(_ context.Context, q string) (bool, error) {
+		if q != "go?" {
+			t.Fatalf("ConfirmFn q = %q, want %q", q, "go?")
+		}
+		return false, errors.New("nope")
+	}
+	got, err := fp.Confirm(context.Background(), "go?")
+	if got != false {
+		t.Fatalf("Confirm = %v, want false", got)
+	}
+	if err == nil || err.Error() != "nope" {
+		t.Fatalf("Confirm err = %v, want 'nope'", err)
+	}
+	if len(fp.Asked) != 1 || fp.Asked[0] != "go?" {
+		t.Fatalf("Asked = %v, want [go?]", fp.Asked)
+	}
+}
+
 func TestFakePrompter_panicsWhenExhausted(t *testing.T) {
 	fp := NewFakePrompter([]bool{true})
 	ctx := context.Background()

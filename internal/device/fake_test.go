@@ -31,6 +31,27 @@ func TestFakeLister_returnsCannedDevices(t *testing.T) {
 	}
 }
 
+func TestFakeLister_ListFnTakesPrecedenceOverCannedFields(t *testing.T) {
+	want := []Device{{UDID: "ZZZ", Name: "dyn"}}
+	f := &FakeLister{
+		Devices: []Device{{UDID: "AAA"}}, // should be ignored
+		Err:     errors.New("canned err — should be ignored"),
+		ListFn: func(_ context.Context) ([]Device, error) {
+			return want, nil
+		},
+	}
+	got, err := f.List(context.Background())
+	if err != nil {
+		t.Fatalf("List err = %v, want nil (ListFn path)", err)
+	}
+	if len(got) != 1 || got[0].UDID != "ZZZ" {
+		t.Fatalf("List = %+v, want %+v", got, want)
+	}
+	if f.Calls != 1 {
+		t.Fatalf("Calls = %d, want 1", f.Calls)
+	}
+}
+
 func TestFakeLister_returnsCannedError(t *testing.T) {
 	sentinel := errors.New("usbmuxd unreachable")
 	f := &FakeLister{Err: sentinel}

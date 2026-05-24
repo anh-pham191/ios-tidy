@@ -84,11 +84,21 @@ func (p *stdinPrompter) Confirm(ctx context.Context, question string) (bool, err
 
 // FakePrompter is a deterministic Prompter for tests.
 //
-// Answers are dequeued in order. When the queue is exhausted, Confirm panics
-// to fail the test loudly.
+// There are two modes:
+//   - Function mode: set ConfirmFn and Confirm delegates to it. The recording
+//     slice Asked is still populated.
+//   - Queue mode (default): construct with NewFakePrompter and answers are
+//     dequeued in order. When the queue is exhausted, Confirm panics to fail
+//     the test loudly.
+//
+// Function mode takes precedence when ConfirmFn is non-nil.
 type FakePrompter struct {
 	answers []bool
 	Asked   []string
+	// ConfirmFn, when non-nil, supersedes the queued-answer path and is
+	// invoked per call. Tests that need to assert "Confirm must not be
+	// called" can set this to a function that calls t.Fatalf.
+	ConfirmFn func(ctx context.Context, question string) (bool, error)
 }
 
 // NewFakePrompter returns a FakePrompter pre-loaded with the given answers.
@@ -96,9 +106,13 @@ func NewFakePrompter(answers []bool) *FakePrompter {
 	return &FakePrompter{answers: append([]bool(nil), answers...)}
 }
 
-// Confirm records the question, pops the next queued answer, and returns it.
-func (f *FakePrompter) Confirm(_ context.Context, question string) (bool, error) {
+// Confirm records the question and dispatches to ConfirmFn (if set) or the
+// queued-answer path.
+func (f *FakePrompter) Confirm(ctx context.Context, question string) (bool, error) {
 	f.Asked = append(f.Asked, question)
+	if f.ConfirmFn != nil {
+		return f.ConfirmFn(ctx, question)
+	}
 	if len(f.answers) == 0 {
 		panic("FakePrompter exhausted — test asked more questions than expected")
 	}

@@ -16,6 +16,13 @@ type FakeClient struct {
 	ListEntries []Entry
 	ListErr     error
 	ListCalls   []ListCall
+	// ListFn, when non-nil, supersedes ListEntries/ListErr and is invoked per
+	// call. It receives the same ctx/udid/pattern the production Client would,
+	// so tests that need to simulate dynamic behaviour (e.g. different
+	// outcomes per call, inspect ctx cancellation) can do so without touching
+	// the canned-response fields. The recording slice ListCalls is appended to
+	// on every call regardless of which path is taken.
+	ListFn func(ctx context.Context, udid, pattern string) ([]Entry, error)
 
 	PullResult  PullResult
 	PullResults []PullResult // optional queue; takes precedence over PullResult
@@ -50,8 +57,11 @@ type RemoveCall struct {
 	Pattern string
 }
 
-func (f *FakeClient) List(_ context.Context, udid, pattern string) ([]Entry, error) {
+func (f *FakeClient) List(ctx context.Context, udid, pattern string) ([]Entry, error) {
 	f.ListCalls = append(f.ListCalls, ListCall{UDID: udid, Pattern: pattern})
+	if f.ListFn != nil {
+		return f.ListFn(ctx, udid, pattern)
+	}
 	if f.ListErr != nil {
 		return nil, f.ListErr
 	}

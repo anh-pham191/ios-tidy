@@ -23,10 +23,9 @@ func TestCrashLogsList_tableOutput_filtersByPatternAndPrintsBytes(t *testing.T) 
 			{Path: "/Mail.crash", Size: 2048},
 		},
 	}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsList(context.Background(), deps, []string{"--pattern", "Chrome-*"}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsList(context.Background(), deps, []string{"--pattern", "Chrome-*"})
 
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
@@ -54,10 +53,9 @@ func TestCrashLogsList_jsonOutput_isCleanJSON(t *testing.T) {
 			{Path: "/A.ips", Size: 10, ModTime: time.Date(2026, 5, 23, 0, 0, 0, 0, time.UTC)},
 		},
 	}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsList(context.Background(), deps, []string{"--json"}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsList(context.Background(), deps, []string{"--json"})
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
 	}
@@ -80,10 +78,9 @@ func TestCrashLogsList_errorsWhenMultipleDevicesAndNoFlag(t *testing.T) {
 		{UDID: "U2", Name: "Phone2"},
 	}}
 	cc := &crashlogs.FakeClient{}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsList(context.Background(), deps, []string{}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsList(context.Background(), deps, []string{})
 	if exit == 0 {
 		t.Fatalf("exit = 0, want non-zero")
 	}
@@ -98,10 +95,9 @@ func TestCrashLogsList_errorsWhenMultipleDevicesAndNoFlag(t *testing.T) {
 func TestCrashLogsList_propagatesClientError(t *testing.T) {
 	dl := &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}}
 	cc := &crashlogs.FakeClient{ListErr: errors.New("boom")}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsList(context.Background(), deps, []string{}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsList(context.Background(), deps, []string{})
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1", exit)
 	}
@@ -120,13 +116,12 @@ func TestCrashLogsPull_happyPath_singleBulkPullCallWhenNoConflicts(t *testing.T)
 		PullResult: crashlogs.PullResult{Pulled: 2, Bytes: 300},
 	}
 	fp := ui.NewFakePrompter(nil) // no prompts expected — fresh out dir
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: fp}
-
 	outDir := t.TempDir()
 	args := []string{"--out", outDir, "--pattern", "Chrome-*"}
 
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsPull(context.Background(), deps, args, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: fp, Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsPull(context.Background(), deps, args)
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
 	}
@@ -158,7 +153,6 @@ func TestCrashLogsPull_overwritePromptNo_abortsEntireBulkPull(t *testing.T) {
 		PullResult: crashlogs.PullResult{Pulled: 2, Bytes: 300},
 	}
 	fp := ui.NewFakePrompter([]bool{false}) // user says no to the one conflict
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: fp}
 
 	outDir := t.TempDir()
 	// Pre-create one destination file so exactly one prompt fires.
@@ -168,7 +162,8 @@ func TestCrashLogsPull_overwritePromptNo_abortsEntireBulkPull(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", outDir}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: fp, Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", outDir})
 
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1 (abort on declined overwrite)", exit)
@@ -200,7 +195,6 @@ func TestCrashLogsPull_forceFlag_bypassesOverwritePromptAndPullsOnce(t *testing.
 	}
 	// FakePrompter with no answers: if Confirm is called, the test panics.
 	fp := ui.NewFakePrompter(nil)
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: fp}
 
 	outDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outDir, "Chrome-1.ips"), []byte("old"), 0o644); err != nil {
@@ -208,7 +202,8 @@ func TestCrashLogsPull_forceFlag_bypassesOverwritePromptAndPullsOnce(t *testing.
 	}
 
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", outDir, "--force"}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: fp, Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", outDir, "--force"})
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
 	}
@@ -235,10 +230,9 @@ func TestCrashLogsPull_partialFailureFromAdapter_returnsNonZeroAndReportsCounts(
 			},
 		},
 	}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", t.TempDir()}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", t.TempDir()})
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1 (partial failure)", exit)
 	}
@@ -265,10 +259,9 @@ func TestCrashLogsPull_totalAdapterError_returnsNonZeroAndReportsAllAsFailed(t *
 		},
 		PullErr: errors.New("transport boom"),
 	}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", t.TempDir()}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", t.TempDir()})
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1", exit)
 	}
@@ -286,12 +279,11 @@ func TestCrashLogsPull_createsOutDirIfMissing(t *testing.T) {
 		ListEntries: []crashlogs.Entry{{Path: "/A.ips", Size: 10}},
 		PullResult:  crashlogs.PullResult{Pulled: 1, Bytes: 10},
 	}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	parent := t.TempDir()
 	outDir := filepath.Join(parent, "nested", "out") // does not exist
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", outDir}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsPull(context.Background(), deps, []string{"--out", outDir})
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
 	}
@@ -303,10 +295,9 @@ func TestCrashLogsPull_createsOutDirIfMissing(t *testing.T) {
 func TestCrashLogsPull_errorsWhenOutMissing(t *testing.T) {
 	dl := &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}}
 	cc := &crashlogs.FakeClient{}
-	deps := crashLogsDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil)}
-
 	var stdout, stderr bytes.Buffer
-	exit := runCrashLogsPull(context.Background(), deps, []string{}, &stdout, &stderr)
+	deps := runDeps{Lister: dl, Client: cc, Prompter: ui.NewFakePrompter(nil), Stdout: &stdout, Stderr: &stderr}
+	exit := runCrashLogsPull(context.Background(), deps, []string{})
 	if exit == 0 {
 		t.Fatalf("exit = 0, want non-zero")
 	}

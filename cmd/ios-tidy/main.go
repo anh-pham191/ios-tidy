@@ -61,12 +61,14 @@ func dispatch(
 		al, _ := iosbackend.NewApps()
 		return runStorage(ctx, opts, lister, sc, al, out, errOut)
 	case "crashlogs":
-		deps := crashLogsDeps{
+		deps := runDeps{
 			Lister:   lister,
 			Client:   iosbackend.NewCrashLogs(),
 			Prompter: ui.NewStdinPrompter(os.Stdin, errOut),
+			Stdout:   out,
+			Stderr:   errOut,
 		}
-		return runCrashLogs(ctx, deps, args[1:], out, errOut)
+		return runCrashLogs(ctx, deps, args[1:])
 	default:
 		fmt.Fprintf(errOut, "ios-tidy: unknown subcommand %q\n", args[0])
 		printUsage(errOut)

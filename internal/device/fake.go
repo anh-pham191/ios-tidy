@@ -8,10 +8,19 @@ type FakeLister struct {
 	Devices []Device
 	Err     error
 	Calls   int
+	// ListFn, when non-nil, supersedes Devices/Err and is invoked per call. It
+	// receives the same ctx the production Lister would, so tests that need
+	// dynamic behaviour (e.g. different results per call, inspect ctx
+	// cancellation) can do so without touching the canned fields. Calls is
+	// still incremented on every call regardless of which path is taken.
+	ListFn func(ctx context.Context) ([]Device, error)
 }
 
-func (f *FakeLister) List(_ context.Context) ([]Device, error) {
+func (f *FakeLister) List(ctx context.Context) ([]Device, error) {
 	f.Calls++
+	if f.ListFn != nil {
+		return f.ListFn(ctx)
+	}
 	if f.Err != nil {
 		return nil, f.Err
 	}
