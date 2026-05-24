@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -45,6 +46,19 @@ func dispatch(
 		return 0
 	case "devices":
 		return newDevicesCmd(out, errOut, lister, checker).Run(ctx, args[1:])
+	case "storage":
+		fs := flag.NewFlagSet("storage", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		opts := storageOpts{}
+		fs.StringVar(&opts.Device, "device", "", "UDID to target; omit if exactly one device is connected")
+		fs.BoolVar(&opts.JSON, "json", false, "emit JSON instead of a table")
+		fs.IntVar(&opts.Limit, "limit", 0, "show only the top N apps by total bytes; 0 or negative means all")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2 // flag.ContinueOnError already wrote usage to errOut
+		}
+		sc := iosbackend.NewStorage()
+		al, _ := iosbackend.NewApps()
+		return runStorage(ctx, opts, lister, sc, al, out, errOut)
 	default:
 		fmt.Fprintf(errOut, "ios-tidy: unknown subcommand %q\n", args[0])
 		printUsage(errOut)
@@ -57,6 +71,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "subcommands:")
 	fmt.Fprintln(w, "  devices    list connected iPhones")
+	fmt.Fprintln(w, "  storage    show device free/used + app sizes")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "global flags:")
 	fmt.Fprintln(w, "  --version  print version and exit")
