@@ -1097,3 +1097,75 @@ func TestAppsClean_trimsLeadingWhitespaceInBundleID(t *testing.T) {
 		t.Errorf("RemoveCalls = %v, want 2 (trim ran, typed gate matched)", fakeFS.RemoveCalls)
 	}
 }
+
+// TestAppsClean_documentsPromptEnumeratesAllAuthorizedTargets pins M-2: the
+// warning emitted before the typed-bundle-ID prompt MUST enumerate every
+// authorized target (tmp + Caches + Documents) with their file counts and
+// byte totals. Typing the bundle ID authorizes deletion across ALL enabled
+// --include-* targets, so the safety copy must name them all — the
+// original warning only named Documents, a serious safety-copy mismatch.
+func TestAppsClean_documentsPromptEnumeratesAllAuthorizedTargets(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Path: "tmp/a", Size: 10}, {Path: "tmp/b", Size: 20}},
+			"Library/Caches": {{Path: "Library/Caches/c", Size: 1000}},
+			"Documents": {
+				{Path: "Documents/secret.txt", Size: 100},
+				{Path: "Documents/photos/img.jpg", Size: 2048},
+			},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
+		},
+	}
+	fp := &ui.FakePrompter{Lines: []string{"com.example.app"}}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{
+		"--device", "U1",
+		"--include-tmp", "--include-caches", "--include-documents",
+		"com.example.app",
+	})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	out := stdout.String()
+	// Isolate the WARNING block — it must start at "WARNING" and run
+	// downward. The per-target enumeration is the load-bearing part of
+	// M-2; we don't want to accept a passing assertion that's actually
+	// satisfied by the RenderCleanPlan block ABOVE the warning.
+	warnIdx := strings.Index(out, "WARNING")
+	if warnIdx < 0 {
+		t.Fatalf("output is missing WARNING block; got:\n%s", out)
+	}
+	warning := out[warnIdx:]
+	// The enumeration must name every authorized target INSIDE the
+	// warning block.
+	for _, want := range []string{"tmp", "Library/Caches", "Documents"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning must name target %q; warning block:\n%s", want, warning)
+		}
+	}
+	// Documents-specific user-data warning must remain.
+	if !strings.Contains(warning, "NOT recoverable") {
+		t.Errorf("warning must still flag Documents as NOT recoverable; got:\n%s", warning)
+	}
+	// File counts must appear in the warning block:
+	// tmp 2 files, Caches 1 file, Documents 2 files. Use the smallest
+	// non-trivial token "1 file" so we don't depend on pluralization.
+	if !strings.Contains(warning, "2 file") || !strings.Contains(warning, "1 file") {
+		t.Errorf("warning must include per-target file counts; got:\n%s", warning)
+	}
+}

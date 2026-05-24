@@ -286,9 +286,28 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 	// Task 12: for the non-Documents flow, a basic y/N prompt suffices and
 	// --yes may skip it.
 	if *includeDocs {
+		// M-2: enumerate EVERY authorized target in the warning so the
+		// user sees what typing the bundle ID is about to authorize.
+		// Typing the bundle ID is the only confirmation for the full
+		// destructive set when --include-documents is in play; if the
+		// copy only mentions Documents but tmp/ and Library/Caches are
+		// also enabled, the safety contract is misleading.
 		fmt.Fprintf(deps.Stdout,
-			"WARNING: this will delete user data in %s's Documents folder. Files are NOT recoverable.\n",
-			bundleID)
+			"WARNING: typing the bundle ID will authorize deletion of:\n")
+		for _, p := range plans {
+			line := fmt.Sprintf("  - %s/  (%s, %d files)",
+				p.Target.Name,
+				ui.FormatBytes(uint64(p.TotalBytes)),
+				len(p.Files))
+			if p.Target == sandbox.TargetDocuments {
+				// L-2: keep the user-data warning attached to the
+				// Documents row so the unrecoverable copy stays
+				// inline with the target that triggered the strict
+				// gate.
+				line += " — user data, NOT recoverable"
+			}
+			fmt.Fprintln(deps.Stdout, line)
+		}
 		typed, err := deps.Prompter.ReadLine(ctx,
 			fmt.Sprintf("Type the bundle ID (%s) to confirm:", bundleID))
 		if err != nil {
