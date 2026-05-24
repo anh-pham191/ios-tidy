@@ -83,16 +83,42 @@ func TestBuildPlan_propagatesWalkError(t *testing.T) {
 	}
 }
 
-func TestExecute_tmpRemovesAllAndCountsPlanFiles(t *testing.T) {
-	fs := &FakeFS{}
+func TestExecute_tmpRemovesChildrenButPreservesTargetNode(t *testing.T) {
+	// Some iOS apps assume tmp/ and Library/Caches/ exist at launch and
+	// crash when the directory node is missing. Execute MUST RemoveAll
+	// each top-level child rather than the target root itself.
+	fs := &FakeFS{
+		ListResults: map[string][]FileInfo{
+			"tmp": {
+				{Name: "a", Path: "tmp/a"},
+				{Name: "subdir", Path: "tmp/subdir", IsDir: true},
+			},
+		},
+	}
 	plan := CleanPlan{
 		Target:     TargetTmp,
-		Files:      []FileInfo{{Path: "tmp/a", Size: 10}, {Path: "tmp/b", Size: 20}},
+		Files:      []FileInfo{{Path: "tmp/a", Size: 10}, {Path: "tmp/subdir/b", Size: 20}},
 		TotalBytes: 30,
 	}
 	res := Execute(context.Background(), fs, plan)
-	if got, want := fs.RemoveAllCalls, []string{"tmp"}; len(got) != 1 || got[0] != want[0] {
-		t.Fatalf("RemoveAllCalls = %v, want %v", got, want)
+
+	// The target node itself ("tmp") must NOT appear in RemoveAllCalls.
+	for _, p := range fs.RemoveAllCalls {
+		if p == "tmp" {
+			t.Errorf("RemoveAll was called on the target node %q — should only act on children: %v", p, fs.RemoveAllCalls)
+		}
+	}
+	// Both children should have been RemoveAll'd.
+	want := map[string]bool{"tmp/a": false, "tmp/subdir": false}
+	for _, p := range fs.RemoveAllCalls {
+		if _, ok := want[p]; ok {
+			want[p] = true
+		}
+	}
+	for child, seen := range want {
+		if !seen {
+			t.Errorf("RemoveAll(%q) was not called; RemoveAllCalls=%v", child, fs.RemoveAllCalls)
+		}
 	}
 	if len(fs.RemoveCalls) != 0 {
 		t.Errorf("Remove was called per-file but should not be: %v", fs.RemoveCalls)
@@ -105,9 +131,22 @@ func TestExecute_tmpRemovesAllAndCountsPlanFiles(t *testing.T) {
 	}
 }
 
-func TestExecute_tmpRecordsFailureOnRemoveAllError(t *testing.T) {
+func TestExecute_emptyTargetIsClean(t *testing.T) {
+	// Target dir is empty → no RemoveAll calls, no failures.
+	fs := &FakeFS{ListResults: map[string][]FileInfo{"tmp": nil}}
+	plan := CleanPlan{Target: TargetTmp}
+	res := Execute(context.Background(), fs, plan)
+	if len(fs.RemoveAllCalls) != 0 {
+		t.Errorf("RemoveAllCalls = %v, want none for empty target", fs.RemoveAllCalls)
+	}
+	if len(res.Failures) != 0 {
+		t.Errorf("Failures = %+v, want none", res.Failures)
+	}
+}
+
+func TestExecute_listErrorRecordedAsFailureOnTargetRoot(t *testing.T) {
 	bang := errors.New("device disconnected")
-	fs := &FakeFS{RemoveAllErr: bang}
+	fs := &FakeFS{ListErr: bang}
 	plan := CleanPlan{
 		Target:     TargetCaches,
 		Files:      []FileInfo{{Path: "Library/Caches/x", Size: 1}},
@@ -122,6 +161,37 @@ func TestExecute_tmpRecordsFailureOnRemoveAllError(t *testing.T) {
 	}
 	if res.Failures[0].Path != "Library/Caches" {
 		t.Errorf("Failures[0].Path = %q, want %q", res.Failures[0].Path, "Library/Caches")
+	}
+	if !errors.Is(res.Failures[0].Err, bang) {
+		t.Errorf("Failures[0].Err = %v, want %v", res.Failures[0].Err, bang)
+	}
+}
+
+func TestExecute_tmpRecordsPerChildFailureOnRemoveAllError(t *testing.T) {
+	// When RemoveAll fails on a child, the failure is recorded against that
+	// child path (not against the target root). Bytes counters do not
+	// advance for failed children.
+	bang := errors.New("device disconnected")
+	fs := &FakeFS{
+		ListResults: map[string][]FileInfo{
+			"Library/Caches": {{Name: "x", Path: "Library/Caches/x"}},
+		},
+		RemoveAllErr: bang,
+	}
+	plan := CleanPlan{
+		Target:     TargetCaches,
+		Files:      []FileInfo{{Path: "Library/Caches/x", Size: 1}},
+		TotalBytes: 1,
+	}
+	res := Execute(context.Background(), fs, plan)
+	if res.Removed != 0 || res.Bytes != 0 {
+		t.Errorf("res = %+v, want Removed=0 Bytes=0", res)
+	}
+	if len(res.Failures) != 1 {
+		t.Fatalf("Failures len = %d, want 1; got %+v", len(res.Failures), res.Failures)
+	}
+	if res.Failures[0].Path != "Library/Caches/x" {
+		t.Errorf("Failures[0].Path = %q, want child path %q", res.Failures[0].Path, "Library/Caches/x")
 	}
 	if !errors.Is(res.Failures[0].Err, bang) {
 		t.Errorf("Failures[0].Err = %v, want %v", res.Failures[0].Err, bang)

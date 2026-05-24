@@ -229,6 +229,8 @@ export IOS_TIDY_TEST_SENTINEL_BUNDLE_ID=com.your-org.your-test-app
 
 The sentinel bundle must be an app you have installed AND consent to having tmp/ files written into and deleted. Pick a TestFlight or Xcode-built app you control.
 
+**Warning — destructive test scope:** the destructive sentinel test exercises the production `sandbox.Execute` code path against the chosen bundle. That code RemoveAll's every top-level entry inside `tmp/` (the directory node itself survives, but its contents do not). Running `make test-device` with `IOS_TIDY_TEST_ALLOW_DESTRUCTIVE=1` will wipe the entire `tmp/` of whichever app you set `IOS_TIDY_TEST_SENTINEL_BUNDLE_ID` to — not just the sentinel file. Do NOT point the sentinel bundle at a daily-driver app that may have in-flight drafts in its `tmp/`.
+
 ### Coverage
 
 ```bash

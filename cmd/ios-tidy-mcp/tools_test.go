@@ -708,6 +708,13 @@ func appsCleanFixture() (*sandbox.FakeFS, *sandbox.FakeSandbox, *loadingProbeSto
 			"Library/Caches": {{Path: "Library/Caches/c", Size: 20}},
 			"Documents":      {{Path: "Documents/secret.txt", Size: 100}},
 		},
+		// ListResults seeds the top-level child enumeration used by
+		// executeRemoveAll (which removes children rather than the
+		// target node itself — see internal/sandbox/cleaner.go).
+		ListResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Name: "a", Path: "tmp/a"}},
+			"Library/Caches": {{Name: "c", Path: "Library/Caches/c"}},
+		},
 	}
 	sb := sandbox.NewFakeSandbox()
 	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})

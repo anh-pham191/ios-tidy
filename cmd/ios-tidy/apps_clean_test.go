@@ -293,6 +293,10 @@ func TestAppsClean_basicPromptYesProceeds(t *testing.T) {
 			"tmp":            {{Path: "tmp/a", Size: 10}},
 			"Library/Caches": {{Path: "Library/Caches/c", Size: 20}},
 		},
+		ListResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Name: "a", Path: "tmp/a"}},
+			"Library/Caches": {{Name: "c", Path: "Library/Caches/c"}},
+		},
 	}
 	sb := sandbox.NewFakeSandbox()
 	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
@@ -337,6 +341,9 @@ func TestAppsClean_yesFlagSkipsBasicPrompt(t *testing.T) {
 		WalkResults: map[string][]sandbox.FileInfo{
 			"tmp": {{Path: "tmp/a", Size: 1}},
 		},
+		ListResults: map[string][]sandbox.FileInfo{
+			"tmp": {{Name: "a", Path: "tmp/a"}},
+		},
 	}
 	sb := sandbox.NewFakeSandbox()
 	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
@@ -378,10 +385,14 @@ func TestAppsClean_partialFailureReportsAndExitsNonZero(t *testing.T) {
 			"tmp":            {{Path: "tmp/a", Size: 10}},
 			"Library/Caches": {{Path: "Library/Caches/c", Size: 20}},
 		},
+		ListResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Name: "a", Path: "tmp/a"}},
+			"Library/Caches": {{Name: "c", Path: "Library/Caches/c"}},
+		},
 		// Both targets share one FakeFS, so we can't fail just caches via
 		// per-path Remove errors (those only apply to file-by-file Remove).
-		// Use a function-style failure via RemoveAllErr instead — both
-		// RemoveAll calls fail, so we exercise the "all targets failed"
+		// Use a function-style failure via RemoveAllErr instead — every
+		// per-child RemoveAll fails, so we exercise the "all targets failed"
 		// branch as a representative non-zero exit path.
 		RemoveAllErr: errors.New("device disconnected"),
 	}
@@ -751,6 +762,10 @@ func TestAppsClean_yesFlagAfterBundleIDIsHonored(t *testing.T) {
 		WalkResults: map[string][]sandbox.FileInfo{
 			"tmp":            {{Path: "tmp/a", Size: 1}},
 			"Library/Caches": {{Path: "Library/Caches/c", Size: 2}},
+		},
+		ListResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Name: "a", Path: "tmp/a"}},
+			"Library/Caches": {{Name: "c", Path: "Library/Caches/c"}},
 		},
 	}
 	sb := sandbox.NewFakeSandbox()

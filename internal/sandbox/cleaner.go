@@ -64,10 +64,14 @@ func BuildPlan(ctx context.Context, fs FS, target Target) (CleanPlan, error) {
 	return plan, nil
 }
 
-// Execute deletes the planned files. For tmp and Library/Caches it issues a
-// single RemoveAll on the target root (cheap, atomic-from-the-CLI's-view).
-// For Documents — which holds user data — it deletes file-by-file so the
-// caller can report which specific files failed.
+// Execute deletes the planned files. For tmp and Library/Caches it walks one
+// level into the target root, then issues a RemoveAll for each top-level
+// child — the target directory node ITSELF is preserved because some iOS
+// apps assume tmp/ and Library/Caches/ exist at launch and crash if the
+// node is missing (tmp/ is recreated by iOS on reboot per Apple's File
+// System Basics, but Caches/ regeneration is app-managed; we preserve both
+// to be safe). For Documents — which holds user data — Execute deletes
+// file-by-file so the caller can report which specific files failed.
 func Execute(ctx context.Context, fs FS, plan CleanPlan) CleanResult {
 	res := CleanResult{Target: plan.Target}
 	if plan.Target == TargetDocuments {
@@ -78,17 +82,85 @@ func Execute(ctx context.Context, fs FS, plan CleanPlan) CleanResult {
 	return res
 }
 
+// executeRemoveAll enumerates the immediate children of plan.Target.Root and
+// RemoveAlls each one. The target node itself is never removed. Per-child
+// RemoveAll failures are reported individually so partial-success cleanup
+// is observable.
 func executeRemoveAll(ctx context.Context, fs FS, plan CleanPlan, res *CleanResult) {
-	if err := fs.RemoveAll(ctx, plan.Target.Root); err != nil {
+	children, err := fs.List(ctx, plan.Target.Root)
+	if err != nil {
+		// Can't list the target → report a single failure against the
+		// target node so the caller knows nothing was attempted.
 		res.Failures = append(res.Failures, Failure{Path: plan.Target.Root, Err: err})
 		return
 	}
-	// Trust the plan's accounting: the walk we did to build it is the closest
-	// estimate of what's gone. If the device's view changed between Walk and
-	// RemoveAll, the integration test will catch a mismatch, but the unit
-	// path proceeds with the planned numbers.
-	res.Removed = len(plan.Files)
-	res.Bytes = plan.TotalBytes
+	// Bucket the plan's file sizes by which top-level child they live
+	// under, so the per-child Removed/Bytes accounting reflects the
+	// children that successfully RemoveAll'd.
+	bytesByChild := make(map[string]int64, len(children))
+	filesByChild := make(map[string]int, len(children))
+	for _, fi := range plan.Files {
+		child := topLevelChild(plan.Target.Root, fi.Path)
+		if child == "" {
+			continue
+		}
+		bytesByChild[child] += fi.Size
+		filesByChild[child]++
+	}
+	for _, c := range children {
+		childPath := c.Path
+		if childPath == "" {
+			// Some FS implementations may return Name without Path;
+			// reconstruct defensively. Production afcFS always sets Path,
+			// but the FakeFS is permissive.
+			childPath = plan.Target.Root + "/" + c.Name
+		}
+		if err := fs.RemoveAll(ctx, childPath); err != nil {
+			res.Failures = append(res.Failures, Failure{Path: childPath, Err: err})
+			continue
+		}
+		// On success, credit the planned bytes for files under this child.
+		// For non-dir children (a single file at the top level), the bucket
+		// equals the file's own size; for dir children the bucket sums
+		// everything underneath that was walked.
+		if c.IsDir {
+			res.Removed += filesByChild[childPath]
+			res.Bytes += bytesByChild[childPath]
+		} else {
+			// Top-level file: count it as one removal and credit its bytes
+			// from the plan if we walked it.
+			res.Removed += filesByChild[childPath]
+			res.Bytes += bytesByChild[childPath]
+		}
+	}
+}
+
+// topLevelChild returns the path to the top-level child of root that
+// contains entryPath, or "" if entryPath is not under root. For
+// root="tmp", entryPath="tmp/sub/a.txt" returns "tmp/sub"; for
+// entryPath="tmp/a.txt" returns "tmp/a.txt".
+func topLevelChild(root, entryPath string) string {
+	if !pathHasPrefix(entryPath, root+"/") {
+		return ""
+	}
+	rest := entryPath[len(root)+1:]
+	if i := indexByte(rest, '/'); i >= 0 {
+		return root + "/" + rest[:i]
+	}
+	return root + "/" + rest
+}
+
+func pathHasPrefix(s, p string) bool {
+	return len(s) >= len(p) && s[:len(p)] == p
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
 }
 
 func executePerFile(ctx context.Context, fs FS, plan CleanPlan, res *CleanResult) {
