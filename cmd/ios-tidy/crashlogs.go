@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"text/tabwriter"
 
 	"github.com/anh-pham191/ios-tidy/internal/crashlogs"
@@ -128,10 +130,104 @@ func runCrashLogs(ctx context.Context, deps crashLogsDeps, args []string, stdout
 	}
 }
 
-// runCrashLogsPull is implemented in Task 7. Stub keeps the dispatcher
-// compiling for Task 6 — referenced only via the runCrashLogs switch above,
-// so it needs no imports beyond what this file already uses.
-func runCrashLogsPull(_ context.Context, _ crashLogsDeps, _ []string, _, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "crashlogs pull: not implemented yet")
-	return 2
+// ErrSkippedOverwrite is the sentinel reported in stderr when the user
+// declines an overwrite during the pre-scan. Exported so M4 / future
+// callers can reuse the vocabulary.
+var ErrSkippedOverwrite = errors.New("skipped: user declined overwrite")
+
+// summaryFormat is the uniform shape for the per-run summary line emitted to
+// stdout. All three exit paths (declined-abort, total-failure, normal) use
+// this format with different values, so the shape stays consistent for
+// scripts that parse it. Order: pulled, total, bytesFormatted, skipped, failed.
+const summaryFormat = "pulled %d of %d (%s), skipped %d, failed %d\n"
+
+func runCrashLogsPull(ctx context.Context, deps crashLogsDeps, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("crashlogs pull", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		udidFlag    = fs.String("device", "", "UDID of the target device")
+		patternFlag = fs.String("pattern", "*", "filepath.Match glob applied to filepath.Base of each path")
+		outFlag     = fs.String("out", "", "destination directory (required)")
+		forceFlag   = fs.Bool("force", false, "overwrite existing files without prompting")
+	)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *outFlag == "" {
+		fmt.Fprintln(stderr, "crashlogs pull: --out DIR is required")
+		return 2
+	}
+
+	udid, err := resolveDevice(ctx, deps.Lister, *udidFlag, stderr)
+	if err != nil {
+		return 1
+	}
+
+	entries, err := deps.Client.List(ctx, udid, *patternFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "list crash logs: %v\n", err)
+		return 1
+	}
+
+	if err := os.MkdirAll(*outFlag, 0o755); err != nil {
+		fmt.Fprintf(stderr, "create out dir: %v\n", err)
+		return 1
+	}
+
+	// Pre-scan: identify conflicts and prompt the user about each. If any
+	// answer is "no" (and --force is off), abort before the bulk Pull starts.
+	var declined []string
+	if !*forceFlag {
+		for _, e := range entries {
+			dst := crashlogs.DestPath(*outFlag, e.Path)
+			_, statErr := os.Stat(dst)
+			if errors.Is(statErr, fs.ErrNotExist) {
+				continue // no conflict
+			}
+			if statErr != nil {
+				// Non-NotExist stat error (e.g. permission denied). Surface
+				// it so the user sees the path that the bulk Pull is about
+				// to fall over rather than swallowing the symptom.
+				fmt.Fprintf(stderr, "stat %s: %v\n", dst, statErr)
+				return 1
+			}
+			ok, perr := deps.Prompter.Confirm(ctx, fmt.Sprintf("Overwrite %s?", dst))
+			if perr != nil {
+				fmt.Fprintf(stderr, "prompt: %v\n", perr)
+				return 1
+			}
+			if !ok {
+				declined = append(declined, dst)
+			}
+		}
+	}
+	if len(declined) > 0 {
+		fmt.Fprintf(stderr, "%s: declined %d overwrite(s); re-run with --force or remove the conflict(s):\n",
+			ErrSkippedOverwrite.Error(), len(declined))
+		for _, d := range declined {
+			fmt.Fprintf(stderr, "  %s\n", d)
+		}
+		// Uniform summary shape (see summaryFormat below).
+		fmt.Fprintf(stdout, summaryFormat, 0, len(entries), ui.FormatBytes(0), len(declined), 0)
+		return 1
+	}
+
+	// Single bulk pull — go-ios's DownloadReports walks the device once and
+	// pulls every match. No per-entry round-trips from this process.
+	res, perr := deps.Client.Pull(ctx, udid, *patternFlag, *outFlag)
+	if perr != nil {
+		fmt.Fprintf(stderr, "pull crash logs: %v\n", perr)
+		fmt.Fprintf(stdout, summaryFormat, 0, len(entries), ui.FormatBytes(0), 0, len(entries))
+		return 1
+	}
+
+	fmt.Fprintf(stdout, summaryFormat,
+		res.Pulled, len(entries), ui.FormatBytes(uint64(res.Bytes)), 0, len(res.Failures))
+	for _, f := range res.Failures {
+		fmt.Fprintf(stderr, "  failed: %s — %s\n", f.Path, f.ErrMsg)
+	}
+	if len(res.Failures) > 0 {
+		return 1
+	}
+	return 0
 }
