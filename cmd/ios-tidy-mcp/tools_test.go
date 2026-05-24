@@ -711,9 +711,12 @@ func appsCleanFixture() (*sandbox.FakeFS, *sandbox.FakeSandbox, *loadingProbeSto
 	}
 	sb := sandbox.NewFakeSandbox()
 	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+	// Stamp At=now so the probe is within the apps_clean TTL window.
+	// Tests that need to exercise the TTL boundary set their own At
+	// and inject a deps.Now() that fixes the comparison point.
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	return fakeFS, sb, store
@@ -1329,5 +1332,184 @@ func TestAppsClean_probeGate_neverProbed(t *testing.T) {
 	}
 	if !strings.Contains(extractText(res), "apps_probe") {
 		t.Errorf("error must point at apps_probe: %s", extractText(res))
+	}
+}
+
+// ----------------------------------------------------------------------
+// H-3: probe TTL on Vended results consumed by apps_clean
+// ----------------------------------------------------------------------
+
+// TestAppsClean_acceptsRecentVendedProbe pins the positive case: a probe
+// stamped at "now" is fresh and the handler proceeds.
+func TestAppsClean_acceptsRecentVendedProbe(t *testing.T) {
+	now := time.Now()
+	fakeFS, sb, store := appsCleanFixture()
+	store.Results["U1"] = []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now},
+	}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Now = func() time.Time { return now }
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("fresh probe must proceed; got: %s", extractText(res))
+	}
+	if len(fakeFS.RemoveAllCalls) != 2 {
+		t.Errorf("expected Execute to run for tmp+caches; RemoveAll=%v", fakeFS.RemoveAllCalls)
+	}
+}
+
+// TestAppsClean_refusesStaleVendedProbe pins the TTL gate: a probe 10
+// minutes old (twice the 5-minute window) is refused with a message
+// pointing back at apps_probe.
+func TestAppsClean_refusesStaleVendedProbe(t *testing.T) {
+	now := time.Now()
+	_, sb, store := appsCleanFixture()
+	store.Results["U1"] = []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-10 * time.Minute)},
+	}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Sandbox = &trapSandbox{t: t}
+	deps.Now = func() time.Time { return now }
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("stale probe must be refused; got: %s", extractText(res))
+	}
+	text := extractText(res)
+	if !strings.Contains(text, "apps_probe") {
+		t.Errorf("error must steer caller to re-run apps_probe; got: %s", text)
+	}
+	if !strings.Contains(text, "minutes old") {
+		t.Errorf("error must explain the staleness; got: %s", text)
+	}
+}
+
+// TestAppsClean_refusesProbeAtTTLBoundary pins the boundary inclusive:
+// a probe (5 min + 1 sec) old is just past the limit and refused. Uses
+// a deterministic injected clock so the assertion is not flaky.
+func TestAppsClean_refusesProbeAtTTLBoundary(t *testing.T) {
+	now := time.Now()
+	_, sb, store := appsCleanFixture()
+	store.Results["U1"] = []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-5*time.Minute - 1*time.Second)},
+	}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Sandbox = &trapSandbox{t: t}
+	deps.Now = func() time.Time { return now }
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("probe at TTL boundary + 1s must be refused; got: %s", extractText(res))
+	}
+}
+
+// TestAppsClean_acceptsProbeJustUnderTTL is the positive control for the
+// boundary: a probe 4m59s old (just inside the 5-minute window) proceeds.
+func TestAppsClean_acceptsProbeJustUnderTTL(t *testing.T) {
+	now := time.Now()
+	fakeFS, sb, store := appsCleanFixture()
+	store.Results["U1"] = []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-4*time.Minute - 59*time.Second)},
+	}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Now = func() time.Time { return now }
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("probe 4m59s old must proceed; got: %s", extractText(res))
+	}
+	if len(fakeFS.RemoveAllCalls) != 2 {
+		t.Errorf("expected Execute; RemoveAll=%v", fakeFS.RemoveAllCalls)
+	}
+}
+
+// TestAppsClean_freshestProbeWins ensures that when both a stale and a
+// fresh result exist for the same bundle, the newer one is used. The
+// store sort order is by bundleID, not timestamp, so the iteration MUST
+// consult .At rather than positional newness.
+func TestAppsClean_freshestProbeWins(t *testing.T) {
+	now := time.Now()
+	fakeFS, sb, store := appsCleanFixture()
+	store.Results["U1"] = []apps.ProbeResult{
+		// Order: stale first, fresh second.
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-1 * time.Hour)},
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-30 * time.Second)},
+	}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Now = func() time.Time { return now }
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.example.app",
+		"confirm_bundle_id": "com.example.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("freshest probe should win; got: %s", extractText(res))
+	}
+	if len(fakeFS.RemoveAllCalls) != 2 {
+		t.Errorf("expected Execute; RemoveAll=%v", fakeFS.RemoveAllCalls)
+	}
+}
+
+// TestAppsClean_dryRunBypassesTTL pins that dry_run does NOT exercise the
+// TTL gate any differently — a stale probe still allows dry-run planning
+// because dry-run is itself safe (no Execute call). The TTL exists to gate
+// the destructive boundary, not the read-only one.
+//
+// Wait — the current implementation DOES apply the probe gate even for
+// dry-run. That is intentional: returning a plan implies the bundle is
+// touchable, which an LLM caller could use as a probe signal. So a stale
+// probe should also refuse dry-run, even though it's safe. Pin that.
+func TestAppsClean_dryRunRefusedOnStaleProbe(t *testing.T) {
+	now := time.Now()
+	_, sb, store := appsCleanFixture()
+	store.Results["U1"] = []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-10 * time.Minute)},
+	}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Sandbox = &trapSandbox{t: t}
+	deps.Now = func() time.Time { return now }
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id": "com.example.app",
+		// dry_run omitted → default true
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("stale probe must refuse dry-run as well; got: %s", extractText(res))
 	}
 }

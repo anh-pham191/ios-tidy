@@ -78,7 +78,7 @@ Destructive tools (each gated independently — see Safety model):
 
 ## Safety model
 
-Four contracts that are non-bypassable from the MCP transport. There is
+Eight contracts that are non-bypassable from the MCP transport. There is
 no `--yes` equivalent; every gate is its own argument and must be set
 explicitly.
 
@@ -96,13 +96,39 @@ explicitly.
    `i_understand_documents_are_unrecoverable: true`.** Both flags must
    be set, AND `confirm_bundle_id` must still match. There is no bypass.
    `Documents/` contents are not recoverable from this side.
+5. **`apps_clean` refuses non-printable-ASCII bundle IDs.** A Cyrillic
+   homoglyph (e.g. U+0430 `а` mimicking ASCII `a`) inside `bundle_id` or
+   `confirm_bundle_id` is rejected before any device I/O. Apple bundle
+   IDs are reverse-DNS and always ASCII; anything else is a typo or a
+   homograph injection.
+6. **`apps_clean` `dry_run` accepts only a real JSON bool.** A JSON
+   string `"false"` does not disarm the safe default; the handler reads
+   `dry_run` directly and treats any non-bool (string, number, null) as
+   the safe `true`.
+7. **`apps_clean` enforces a 5-minute probe-freshness TTL.** Even a
+   Vended probe result is refused once it is at least 5 minutes old; the
+   error message points back at `apps_probe`. Const, not configurable.
+   CLI is unaffected (human-in-the-loop).
+8. **`crashlogs_pull` `out` is path-restricted.** The destination must
+   be an absolute path, a real directory (NOT a symlink), inside `$HOME`
+   (or the `IOS_TIDY_MCP_PULL_ROOT` override), and NOT inside `.ssh`,
+   `.gnupg`, `Library/LaunchAgents`, `Library/LaunchDaemons`,
+   `Library/Keychains`, or `Library/Cookies`. Symlinks are refused even
+   when their target is itself inside the allow-root, to neutralise
+   TOCTOU swap attacks.
+
+Every destructive tool result also stamps a `device: {udid, name}`
+object so the caller can confirm the operation landed on the same
+device they identified by name via `devices_list`.
 
 ## Probe gate
 
 `apps_clean` refuses to touch any bundle that does not have a `vended`
-outcome recorded in the probe cache. If the cache says `refused`,
-`error`, or `unknown` — or if the bundle was never probed — the tool
-errors with a message pointing back at `apps_probe`. Run:
+outcome recorded in the probe cache, AND additionally requires that
+result to be **less than 5 minutes old**. If the cache says `refused`,
+`error`, or `unknown` — or if the bundle was never probed, or if the
+last Vended result has aged out — the tool errors with a message
+pointing back at `apps_probe`. Run:
 
 ```
 apps_probe bundles=["com.example.myapp"]

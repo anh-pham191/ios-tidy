@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -95,6 +96,7 @@ func buildServerDeps() (serverDeps, error) {
 		Sandbox:      sb,
 		Prober:       apps.NewProber(sb),
 		ProbeStore:   apps.NewFileProbeStore(storeDir),
+		Now:          time.Now,
 	}, nil
 }
 

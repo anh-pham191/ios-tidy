@@ -65,6 +65,61 @@ type serverDeps struct {
 	Prober       apps.Prober
 	ProbeStore   apps.ProbeStore
 	Sandbox      sandbox.Sandbox
+
+	// Now is the clock the destructive MCP handlers consult when
+	// evaluating probe freshness (see probeTTLForMCPClean). Production
+	// wires this to time.Now; tests override with a fixed value so the
+	// TTL boundary can be exercised deterministically. nil means
+	// "default to time.Now()".
+	Now func() time.Time
+}
+
+// probeTTLForMCPClean is how recent a Vended probe must be for the MCP
+// apps_clean handler to accept it. Five minutes is short enough that an
+// LLM caller cannot run apps_probe in turn N and consume the result in
+// turn N+M after the user has corrected its course, but long enough
+// that a normal probe→inspect→clean workflow doesn't trip the gate.
+//
+// Intentionally const, NOT a flag or env var: the value is a safety
+// contract, not a tuning knob. Changing it requires a code change so
+// reviewers see the diff.
+//
+// CLI path is unaffected — the CLI runs interactively with a human in
+// the loop, and the typed-bundle-ID gate + apps_probe re-run prompt
+// already handle the same risk there.
+const probeTTLForMCPClean = 5 * time.Minute
+
+// probeVendedAndFresh searches results for the most-recent ProbeResult
+// matching bundleID and reports whether it is (a) Vended AND (b) within
+// probeTTLForMCPClean of now.
+//
+// Return signature: (fresh bool, age time.Duration, found bool). age is
+// meaningful only when found is true. The caller uses age to build the
+// "N minutes old" diagnostic message.
+//
+// Iteration order: newest-first by .At so the freshest matching entry
+// wins. apps.ProbeStore on-disk results are sorted by BundleID, NOT
+// timestamp; the per-bundle ordering is therefore arbitrary, which
+// means we MUST scan by .At rather than assume positional newness.
+func probeVendedAndFresh(results []apps.ProbeResult, bundleID string, now time.Time) (fresh bool, age time.Duration, found bool) {
+	var newest apps.ProbeResult
+	for _, r := range results {
+		if r.BundleID != bundleID {
+			continue
+		}
+		if !found || r.At.After(newest.At) {
+			newest = r
+			found = true
+		}
+	}
+	if !found {
+		return false, 0, false
+	}
+	if newest.Outcome != apps.ProbeVended {
+		return false, now.Sub(newest.At), true
+	}
+	age = now.Sub(newest.At)
+	return age < probeTTLForMCPClean, age, true
 }
 
 // deviceRow is the on-the-wire shape returned by devices_list. Mirrors
@@ -1094,7 +1149,13 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 		}
 		devRef := deviceRef{UDID: udid, Name: devName}
 
-		// Probe gate. Refuse unless the bundle has a Vended probe on record.
+		// Probe gate. Refuse unless the bundle has a Vended probe on record
+		// AND that probe is within the freshness TTL. Same-turn (or near
+		// same-turn) probe→clean is the legitimate workflow; a stale Vended
+		// result indicates the LLM has been steered to skip a re-probe a
+		// human would have run, or that the device's daemon policy may have
+		// changed since the probe (iOS 17 sporadic-refusal territory, see
+		// RESEARCH.md §3).
 		if deps.ProbeStore == nil {
 			return mcp.NewToolResultError("apps_clean: server has no ProbeStore wired"), nil
 		}
@@ -1102,11 +1163,36 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("load probe store: %v", err)), nil
 		}
-		if !probeVendedInResults(results, bundleID) {
+		now := time.Now()
+		if deps.Now != nil {
+			now = deps.Now()
+		}
+		fresh, age, found := probeVendedAndFresh(results, bundleID, now)
+		if !found {
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"apps_clean: bundle %q has not been confirmed as vended on device %s. "+
 					"Run the apps_probe tool with bundles=[%q] first.",
 				bundleID, udid, bundleID,
+			)), nil
+		}
+		if !fresh {
+			// Found a matching result, but either non-vended or stale.
+			// Distinguish the two so the LLM caller knows whether to
+			// re-probe (stale Vended) or stop trying (Refused/Error).
+			if !probeVendedInResults(results, bundleID) {
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"apps_clean: bundle %q has not been confirmed as vended on device %s. "+
+						"Run the apps_probe tool with bundles=[%q] first.",
+					bundleID, udid, bundleID,
+				)), nil
+			}
+			// Stale Vended.
+			ageMin := int(age / time.Minute)
+			limitMin := int(probeTTLForMCPClean / time.Minute)
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"apps_clean: probe result for %q is %d minutes old (>=%d minute limit). "+
+					"Re-run apps_probe with bundles=[%q] first.",
+				bundleID, ageMin, limitMin, bundleID,
 			)), nil
 		}
 
