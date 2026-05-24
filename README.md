@@ -182,6 +182,10 @@ On the device, accept the dialog. If it doesn't appear, unplug, reboot the phone
 
 `go-ios` issue [#653](https://github.com/danielpaulus/go-ios/issues/653) documents sporadic `house_arrest` failures on iOS 17.1+. `ios-tidy` classifies these as transport errors (vs policy refusals) — retry the same command a few times. If it persists, the daemon may genuinely refuse this bundle; `apps probe` will record it as `refused`. [RESEARCH.md §3]
 
+### Old probe cache files no longer load after upgrading
+
+The probe cache JSON schema settled on `bundleID` (capital ID) across all subcommands as of this release. If you upgraded across that change, re-run `ios-tidy apps probe` to rebuild `~/Library/Application Support/ios-tidy/probes/<UDID>.json`.
+
 ### `apps clean` says "not been confirmed as vended"
 
 The probe gate refuses to touch any bundle ID that hasn't been recorded as `vended` in the probe store. Run:

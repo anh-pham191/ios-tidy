@@ -330,11 +330,11 @@ func TestAppsList_jsonShape(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("want 1 row, got %d: %v", len(rows), rows)
 	}
-	if rows[0]["bundleId"] != "com.foo" {
-		t.Errorf("expected bundleId=com.foo (camelCase), got row=%v", rows[0])
+	if rows[0]["bundleID"] != "com.foo" {
+		t.Errorf("expected bundleID=com.foo (camelCase per SHARED_CONTEXT.md §11), got row=%v", rows[0])
 	}
 	// Sanity-check a couple of other camelCase JSON tags so a future refactor
-	// that "fixes" them to bundleID/dynamicBytes-snake would fail loudly.
+	// that "fixes" them to snake_case or PascalCase would fail loudly.
 	if _, ok := rows[0]["dynamicBytes"]; !ok {
 		t.Errorf("missing dynamicBytes key in JSON row: %v", rows[0])
 	}

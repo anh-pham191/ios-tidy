@@ -12,7 +12,7 @@ import "context"
 // JSON tags use camelCase for stable machine-readable output (see
 // cmd/ios-tidy/storage.go for the --json contract).
 type App struct {
-	BundleID           string `json:"bundleId"`
+	BundleID           string `json:"bundleID"`
 	Name               string `json:"name"`
 	Version            string `json:"version"`
 	Container          string `json:"container"`

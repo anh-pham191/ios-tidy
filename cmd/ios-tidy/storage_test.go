@@ -148,7 +148,7 @@ func TestStorageCmd_jsonOutput_singleDevice_fullShape(t *testing.T) {
 			AFCBlockSize  uint64 `json:"afcBlockSize"`
 		} `json:"device"`
 		Apps []struct {
-			BundleID           string `json:"bundleId"`
+			BundleID           string `json:"bundleID"`
 			Name               string `json:"name"`
 			Version            string `json:"version"`
 			Container          string `json:"container"`
