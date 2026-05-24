@@ -852,6 +852,101 @@ func TestAppsClean_openErrorHintsStaleProbe(t *testing.T) {
 	}
 }
 
+// TestAppsClean_rejectsAppleSystemBundle pins the defense-in-depth
+// com.apple.* hard-reject: even if the probe store somehow carried a
+// Vended outcome for a system bundle (test bug, hand-edited file,
+// race), apps clean MUST refuse before opening any sandbox. ios-tidy
+// is for third-party apps only.
+func TestAppsClean_rejectsAppleSystemBundle(t *testing.T) {
+	cases := []string{
+		"com.apple.mobilemail",
+		"com.apple.Music",
+		"com.apple.mobilesafari",
+	}
+	for _, bundle := range cases {
+		t.Run(bundle, func(t *testing.T) {
+			// Pre-seed a Vended probe to prove the reject runs before the
+			// probe gate (i.e. independent of probe state).
+			store := &loadingProbeStore{
+				Results: map[string][]apps.ProbeResult{
+					"U1": {{BundleID: bundle, Outcome: apps.ProbeVended}},
+				},
+			}
+			var stdout, stderr bytes.Buffer
+			exit := runAppsClean(context.Background(), appsDeps{
+				Stdout:  &stdout,
+				Stderr:  &stderr,
+				Devices: &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+				Sandbox: &trapSandbox{t: t},
+				Store:   store,
+			}, []string{bundle, "--device", "U1"})
+			if exit == 0 {
+				t.Fatalf("exit = 0 for system bundle %q, want non-zero", bundle)
+			}
+			if !strings.Contains(stderr.String(), "system app sandbox") {
+				t.Errorf("stderr should explain the system-app refusal; got: %q", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), bundle) {
+				t.Errorf("stderr should echo the offending bundle; got: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// TestAppsClean_doesNotMatchComAppleWithoutDotSuffix pins the precise
+// boundary of the reject regex: only `com.apple.<something>` is refused.
+// A literal `com.apple` (no dot suffix) is a different reverse-DNS
+// namespace (Apple itself uses none, but a third-party domain like
+// `com.applesauce.app` MUST pass through).
+func TestAppsClean_doesNotMatchComAppleWithoutDotSuffix(t *testing.T) {
+	// "com.apple" exactly is a malformed bundle ID — there's no real app
+	// with this — but the rejection rule must still distinguish it from
+	// "com.apple.<rest>". The probe gate will refuse it (no Vended
+	// entry), but the system-app reject MUST NOT fire because the gate
+	// message for a missing probe is different from the system-app one.
+	store := &loadingProbeStore{} // no probe results
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Devices: &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox: &trapSandbox{t: t},
+		Store:   store,
+	}, []string{"com.apple", "--device", "U1"})
+	if exit == 0 {
+		t.Fatalf("exit = 0, want non-zero")
+	}
+	// The expected refusal is the probe gate, NOT the system-app reject.
+	if strings.Contains(stderr.String(), "system app sandbox") {
+		t.Errorf("plain 'com.apple' must NOT be treated as a system bundle; got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not been confirmed as vended") {
+		t.Errorf("stderr should be the probe-gate refusal; got: %q", stderr.String())
+	}
+}
+
+// TestAppsClean_allowsApplesauceBundle pins the negative-side boundary:
+// a third-party bundle like "com.applesauce.app" must pass through the
+// system-app reject. (The probe gate will then refuse it for the same
+// reason as any other un-probed bundle.)
+func TestAppsClean_allowsApplesauceBundle(t *testing.T) {
+	store := &loadingProbeStore{} // no probe results — gate will refuse
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Devices: &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox: &trapSandbox{t: t},
+		Store:   store,
+	}, []string{"com.applesauce.app", "--device", "U1"})
+	if exit == 0 {
+		t.Fatalf("exit = 0, want non-zero")
+	}
+	if strings.Contains(stderr.String(), "system app sandbox") {
+		t.Errorf("'com.applesauce.app' must NOT match the system-app reject; got: %q", stderr.String())
+	}
+}
+
 // TestAppsClean_zeroDevicesExits0 pins the M1 spec contract: when no devices
 // are attached, the command emits an informative stderr message and exits 0.
 // `devices` and `storage` already follow this convention; `apps clean` (via

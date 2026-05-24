@@ -763,6 +763,15 @@ func resolveDeviceRef(ctx context.Context, deps serverDeps, override string) (st
 	return udid, name, nil
 }
 
+// isAppleSystemBundle reports whether bundleID is a com.apple.* system
+// app (case-sensitive prefix match including the trailing dot). A bare
+// "com.apple" is NOT matched — Apple's real bundles always have a third
+// reverse-DNS segment. Used as a defense-in-depth reject independent
+// of (and redundant with) the probe gate.
+func isAppleSystemBundle(bundleID string) bool {
+	return strings.HasPrefix(bundleID, "com.apple.")
+}
+
 // isPrintableASCII reports whether every rune in s is in the printable
 // ASCII range [0x20, 0x7E]. Apple bundle IDs are reverse-DNS; the rule
 // is "ASCII letters, digits, hyphen, and dot". Anything outside that
@@ -1100,6 +1109,17 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("apps_clean: bundle_id is required"), nil
 		}
 
+		// H-2 defense in depth: hard-reject com.apple.* before anything
+		// else. ios-tidy is for third-party apps only; a probe-cache
+		// race / hand-edited file / test bug must never let an MCP
+		// caller delete a system app's sandbox files.
+		if isAppleSystemBundle(bundleID) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"apps_clean: refusing to clean system app sandbox: %q. ios-tidy is for third-party apps only.",
+				bundleID,
+			)), nil
+		}
+
 		// H-1: refuse non-printable-ASCII in bundle_id and confirm_bundle_id.
 		// A Cyrillic 'а' (U+0430) is byte-different from ASCII 'a' but renders
 		// identically; if both bundle_id and confirm_bundle_id share the same
@@ -1162,6 +1182,15 @@ func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 		results, err := deps.ProbeStore.Load(udid)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("load probe store: %v", err)), nil
+		}
+		// Belt-and-suspenders: re-check the system-app reject after the
+		// probe store loads. Defends against a stale or hand-crafted
+		// probe file that claimed a com.apple.* bundle was Vended.
+		if isAppleSystemBundle(bundleID) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"apps_clean: refusing to clean system app sandbox: %q. ios-tidy is for third-party apps only.",
+				bundleID,
+			)), nil
 		}
 		now := time.Now()
 		if deps.Now != nil {

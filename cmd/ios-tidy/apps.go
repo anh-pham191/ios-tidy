@@ -120,6 +120,18 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 	}
 	bundleID := positionals[0]
 
+	// Defense-in-depth hard reject: never touch a system-app sandbox even
+	// if the probe store somehow carried a Vended outcome for it (test
+	// bug, hand-edited file, race). ios-tidy is for third-party apps
+	// only. Matches case-sensitive "com.apple." prefix; "com.apple" alone
+	// is NOT a system bundle and falls through to the probe gate.
+	if isAppleSystemBundle(bundleID) {
+		fmt.Fprintf(deps.Stderr,
+			"error: refusing to clean system app sandbox: %q. ios-tidy is for third-party apps only.\n",
+			bundleID)
+		return 1
+	}
+
 	// Default include-flag combo: tmp + caches when none of --include-* set.
 	// Any explicit --include-* REPLACES the default (so passing only
 	// --include-documents means "Documents only" — exactly the contract the
@@ -159,6 +171,16 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 	results, err := store.Load(udid)
 	if err != nil {
 		fmt.Fprintf(deps.Stderr, "load probe store: %v\n", err)
+		return 1
+	}
+	// Belt-and-suspenders: re-check the system-app reject after loading
+	// the probe store. If a stale or hand-crafted probe file claimed a
+	// com.apple.* bundle was Vended, this second gate catches it before
+	// we trust the cache.
+	if isAppleSystemBundle(bundleID) {
+		fmt.Fprintf(deps.Stderr,
+			"error: refusing to clean system app sandbox: %q. ios-tidy is for third-party apps only.\n",
+			bundleID)
 		return 1
 	}
 	if !probeVended(results, bundleID) {
@@ -306,6 +328,18 @@ func reportResults(stdout, stderr io.Writer, results []sandbox.CleanResult) int 
 		return 1
 	}
 	return 0
+}
+
+// isAppleSystemBundle reports whether bundleID looks like an Apple system
+// app — i.e. a reverse-DNS bundle under the com.apple.* namespace. The
+// match is case-sensitive ("com.apple." prefix); a literal "com.apple"
+// without a dot suffix is NOT a system bundle (and would in any case be a
+// malformed app ID — Apple's real bundles always carry a third segment).
+// Used as a defense-in-depth rejection before AND after the probe gate
+// so a stale or hand-crafted Vended entry can never cause us to touch a
+// system app's sandbox.
+func isAppleSystemBundle(bundleID string) bool {
+	return strings.HasPrefix(bundleID, "com.apple.")
 }
 
 // probeVended reports whether results contains a ProbeVended outcome for

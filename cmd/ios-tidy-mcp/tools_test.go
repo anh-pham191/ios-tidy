@@ -1318,6 +1318,111 @@ func TestCrashLogsPull_resultIncludesDeviceName(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------
+// H-2: hard-reject com.apple.* (defense in depth)
+// ----------------------------------------------------------------------
+
+// TestAppsClean_rejectsAppleSystemBundle pins that an MCP caller cannot
+// reach apps_clean's destructive path on a system bundle even if the
+// probe store has a Vended entry for it. The reject must run BEFORE
+// Sandbox.Open / ProbeStore.Load / etc.
+func TestAppsClean_rejectsAppleSystemBundle(t *testing.T) {
+	cases := []string{
+		"com.apple.mobilemail",
+		"com.apple.Music",
+		"com.apple.mobilesafari",
+	}
+	for _, bundle := range cases {
+		t.Run(bundle, func(t *testing.T) {
+			// Pre-seed a fresh Vended probe so the only thing standing
+			// between the caller and Sandbox.Open is the system-app
+			// reject.
+			fakeFS, sb, store := appsCleanFixture()
+			store.Results["U1"] = []apps.ProbeResult{
+				{BundleID: bundle, Outcome: apps.ProbeVended, At: time.Now()},
+			}
+			deps := newAppsCleanDeps(sb, store)
+			deps.Sandbox = &trapSandbox{t: t} // any Sandbox.Open fails the test
+			h := newAppsCleanHandler(deps)
+
+			res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+				"bundle_id":         bundle,
+				"confirm_bundle_id": bundle,
+				"dry_run":           false,
+			}))
+			if err != nil {
+				t.Fatalf("handler err: %v", err)
+			}
+			if !resultIsError(res) {
+				t.Fatalf("expected error result for system bundle %q; got: %s", bundle, extractText(res))
+			}
+			if !strings.Contains(extractText(res), "system app sandbox") {
+				t.Errorf("error must explain system-app refusal; got: %s", extractText(res))
+			}
+			if !strings.Contains(extractText(res), bundle) {
+				t.Errorf("error must echo the offending bundle; got: %s", extractText(res))
+			}
+			if len(fakeFS.RemoveCalls) != 0 || len(fakeFS.RemoveAllCalls) != 0 {
+				t.Errorf("Execute must not be called on system bundle")
+			}
+		})
+	}
+}
+
+// TestAppsClean_doesNotMatchComAppleWithoutDotSuffix pins the boundary:
+// only com.apple.<something> is rejected. A bare "com.apple" (no dot)
+// or a third-party "com.applesauce.*" must NOT be treated as system.
+func TestAppsClean_doesNotMatchComAppleWithoutDotSuffix(t *testing.T) {
+	_, sb, store := appsCleanFixture()
+	// Empty probe store so the only refusal we'll see is the probe gate,
+	// proving the system-app reject did NOT fire on plain "com.apple".
+	store.Results = map[string][]apps.ProbeResult{}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Sandbox = &trapSandbox{t: t}
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.apple",
+		"confirm_bundle_id": "com.apple",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result; got: %s", extractText(res))
+	}
+	if strings.Contains(extractText(res), "system app sandbox") {
+		t.Errorf("plain 'com.apple' must NOT match the system reject; got: %s", extractText(res))
+	}
+	if !strings.Contains(extractText(res), "apps_probe") {
+		t.Errorf("expected probe-gate refusal pointing at apps_probe; got: %s", extractText(res))
+	}
+}
+
+// TestAppsClean_allowsApplesauceBundle pins that "com.applesauce.<app>"
+// is a third-party domain that must pass through the system reject.
+func TestAppsClean_allowsApplesauceBundle(t *testing.T) {
+	_, sb, store := appsCleanFixture()
+	store.Results = map[string][]apps.ProbeResult{}
+	deps := newAppsCleanDeps(sb, store)
+	deps.Sandbox = &trapSandbox{t: t}
+	h := newAppsCleanHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"bundle_id":         "com.applesauce.app",
+		"confirm_bundle_id": "com.applesauce.app",
+		"dry_run":           false,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result; got: %s", extractText(res))
+	}
+	if strings.Contains(extractText(res), "system app sandbox") {
+		t.Errorf("'com.applesauce.app' must NOT match the system reject; got: %s", extractText(res))
+	}
+}
+
 func TestAppsClean_probeGate_neverProbed(t *testing.T) {
 	store := &loadingProbeStore{Results: map[string][]apps.ProbeResult{}}
 	deps := serverDeps{
