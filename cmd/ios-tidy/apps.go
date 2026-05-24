@@ -97,15 +97,18 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 		includeCache = fs.Bool("include-caches", false, "Include the app's Library/Caches/ folder")
 		storeDir     = fs.String("store-dir", "", "Override probe-store directory (mainly for tests)")
 	)
-	if err := fs.Parse(args); err != nil {
+	// Use splitFlagsAndPositionals to fix the flag.Parse-stops-at-positional
+	// trap: `ios-tidy apps clean BUNDLE --dry-run` MUST honour --dry-run.
+	// See flags.go for the gory details.
+	flagArgs, positionals := splitFlagsAndPositionals(fs, args)
+	if err := fs.Parse(flagArgs); err != nil {
 		return 2
 	}
-	rest := fs.Args()
-	if len(rest) < 1 {
+	if len(positionals) < 1 {
 		fmt.Fprintln(deps.Stderr, "usage: ios-tidy apps clean BUNDLE_ID [flags]")
 		return 2
 	}
-	bundleID := rest[0]
+	bundleID := positionals[0]
 
 	// Default include-flag combo: tmp + caches when none of --include-* set.
 	// Any explicit --include-* REPLACES the default (so passing only

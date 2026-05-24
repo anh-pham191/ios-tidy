@@ -620,6 +620,189 @@ func TestAppsClean_refusesWhenProbeIsRefused(t *testing.T) {
 // for this path lives in Task 10's Sandbox.Open error block; this test is a
 // characterization lock so a future copy-edit of the hint wording can't
 // silently regress the user-visible safety net.
+// TestAppsClean_dryRunFlagAfterBundleIDIsHonored pins the fix for the
+// HIGH-severity bug where flag.Parse stops at the first non-flag argument,
+// silently dropping flags placed after the BUNDLE_ID positional. Before the
+// fix, `ios-tidy apps clean com.example.app --dry-run` would IGNORE
+// --dry-run and proceed to a real deletion after the y/N prompt — a
+// data-loss-adjacent footgun. After the fix, --dry-run is honoured
+// regardless of position.
+func TestAppsClean_dryRunFlagAfterBundleIDIsHonored(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Path: "tmp/a", Size: 10}},
+			"Library/Caches": {{Path: "Library/Caches/c", Size: 20}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	fp := &ui.FakePrompter{
+		ConfirmFn: func(_ context.Context, _ string) (bool, error) {
+			t.Fatalf("Prompter must not be called on --dry-run")
+			return false, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"com.example.app", "--dry-run"})
+
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fakeFS.RemoveCalls) != 0 {
+		t.Errorf("Remove was called even though --dry-run came after BUNDLE_ID: %v", fakeFS.RemoveCalls)
+	}
+	if len(fakeFS.RemoveAllCalls) != 0 {
+		t.Errorf("RemoveAll was called even though --dry-run came after BUNDLE_ID: %v", fakeFS.RemoveAllCalls)
+	}
+	if !strings.Contains(stdout.String(), "Dry run") {
+		t.Errorf("stdout should announce dry run; got: %q", stdout.String())
+	}
+}
+
+// TestAppsClean_deviceFlagAfterBundleIDIsHonored pins the same fix for
+// --device. With two devices attached and --device placed AFTER the bundle
+// ID, the old flag.Parse would silently drop the flag and produce an
+// "ambiguous device" error. After the fix the named UDID is selected.
+func TestAppsClean_deviceFlagAfterBundleIDIsHonored(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp": {{Path: "tmp/a", Size: 1}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U2": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Devices: &device.FakeLister{Devices: []device.Device{
+			{UDID: "U1"}, {UDID: "U2"},
+		}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: ui.NewFakePrompter(nil),
+	}, []string{"com.example.app", "--device", "U2", "--yes"})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0 (--device U2 should have disambiguated); stderr=%q", exit, stderr.String())
+	}
+	// Confirm the Sandbox.Open targeted the bundle on the selected device path.
+	if calls := sb.OpenCalls(); len(calls) != 1 || calls[0] != "com.example.app" {
+		t.Errorf("Sandbox.Open calls = %v, want [com.example.app]", calls)
+	}
+}
+
+// TestAppsClean_includeDocumentsFlagAfterBundleIDIsHonored pins the fix for
+// --include-documents placed after the positional. The strict typed-bundle-ID
+// gate (AskedLines == 1) is the observable proof that the Documents path was
+// activated.
+func TestAppsClean_includeDocumentsFlagAfterBundleIDIsHonored(t *testing.T) {
+	fakeFS, sb, store := docsFixture()
+	fp := &ui.FakePrompter{Lines: []string{"com.example.app"}}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"com.example.app", "--include-documents", "--yes"})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fp.AskedLines) != 1 {
+		t.Errorf("AskedLines = %v, want 1 (strict gate must run — proves --include-documents was honoured)", fp.AskedLines)
+	}
+	if len(fakeFS.RemoveCalls) != 2 {
+		t.Errorf("RemoveCalls = %v, want 2 (Documents/ entries)", fakeFS.RemoveCalls)
+	}
+}
+
+// TestAppsClean_yesFlagAfterBundleIDIsHonored pins the fix for --yes placed
+// after the positional. The FakePrompter has no queued answers; if --yes
+// were silently dropped, the basic Confirm would fire and panic with
+// "exhausted".
+func TestAppsClean_yesFlagAfterBundleIDIsHonored(t *testing.T) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"tmp":            {{Path: "tmp/a", Size: 1}},
+			"Library/Caches": {{Path: "Library/Caches/c", Size: 2}},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	fp := ui.NewFakePrompter(nil) // empty queue — any Confirm call would panic
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"com.example.app", "--yes"})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fp.Asked) != 0 {
+		t.Errorf("Confirm was called even though --yes was passed (after positional): %v", fp.Asked)
+	}
+	// Default include-flag combo is tmp + caches, so two RemoveAll calls.
+	if len(fakeFS.RemoveAllCalls) != 2 {
+		t.Errorf("RemoveAllCalls = %v, want 2 (tmp + Library/Caches default targets)", fakeFS.RemoveAllCalls)
+	}
+}
+
+// TestAppsClean_bogusFlagAfterBundleIDStillErrors pins the negative case:
+// after the helper splits flags from positionals, an unknown flag must still
+// produce a usage error (exit 2) — the helper hands unknown flags to
+// flag.Parse, which writes a standard "flag provided but not defined"
+// message to the FlagSet's output.
+func TestAppsClean_bogusFlagAfterBundleIDStillErrors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Devices: &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+	}, []string{"com.example.app", "--bogus-flag"})
+
+	if exit != 2 {
+		t.Errorf("exit = %d, want 2 (unknown flag should error); stderr=%q", exit, stderr.String())
+	}
+}
+
 func TestAppsClean_openErrorHintsStaleProbe(t *testing.T) {
 	bang := errors.New("connect afc service failed")
 	store := &loadingProbeStore{
