@@ -93,9 +93,9 @@ func TestRunCrashlogsClean_planPrintedBeforePromptIsAsked(t *testing.T) {
 			{Path: "/var/mobile/Library/Logs/CrashReporter/A.ips", Size: 1024},
 		}, nil
 	}
-	var stderrAtPromptTime string
+	var stdoutAtPromptTime string
 	fp.ConfirmFn = func(ctx context.Context, q string) (bool, error) {
-		stderrAtPromptTime = stderr.String()
+		stdoutAtPromptTime = stdout.String()
 		return false, nil
 	}
 	code := runCrashlogsClean(context.Background(), runDeps{
@@ -105,14 +105,14 @@ func TestRunCrashlogsClean_planPrintedBeforePromptIsAsked(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (user aborted)", code)
 	}
-	if !strings.Contains(stderrAtPromptTime, "Plan: ") {
-		t.Fatalf("stderr at prompt time missing plan header; got:\n%s", stderrAtPromptTime)
+	if !strings.Contains(stdoutAtPromptTime, "Plan: ") {
+		t.Fatalf("stdout at prompt time missing plan header; got:\n%s", stdoutAtPromptTime)
 	}
-	if !strings.Contains(stderrAtPromptTime, "/var/mobile/Library/Logs/CrashReporter/A.ips") {
-		t.Fatalf("stderr at prompt time missing entry path; got:\n%s", stderrAtPromptTime)
+	if !strings.Contains(stdoutAtPromptTime, "/var/mobile/Library/Logs/CrashReporter/A.ips") {
+		t.Fatalf("stdout at prompt time missing entry path; got:\n%s", stdoutAtPromptTime)
 	}
-	if !strings.Contains(stderrAtPromptTime, "Total: 1 files, 1.0 KB") {
-		t.Fatalf("stderr at prompt time missing total footer; got:\n%s", stderrAtPromptTime)
+	if !strings.Contains(stdoutAtPromptTime, "Total: 1 files, 1.0 KB") {
+		t.Fatalf("stdout at prompt time missing total footer; got:\n%s", stdoutAtPromptTime)
 	}
 }
 
@@ -191,15 +191,15 @@ func TestRunCrashlogsClean_dryRunNeverCallsRemoveOrPrompter(t *testing.T) {
 	if len(fc.RemoveCalls) != 0 {
 		t.Fatalf("RemoveCalls = %d, want 0", len(fc.RemoveCalls))
 	}
-	body := stderr.String()
+	body := stdout.String()
 	if !strings.Contains(body, "Plan: ") {
-		t.Fatalf("stderr missing plan header; got:\n%s", body)
+		t.Fatalf("stdout missing plan header; got:\n%s", body)
 	}
 	if !strings.Contains(body, "Total: 2 files, 3.1 KB") {
-		t.Fatalf("stderr missing total footer; got:\n%s", body)
+		t.Fatalf("stdout missing total footer; got:\n%s", body)
 	}
 	if !strings.Contains(body, "Dry run — no changes made.") {
-		t.Fatalf("stderr missing dry-run notice; got:\n%s", body)
+		t.Fatalf("stdout missing dry-run notice; got:\n%s", body)
 	}
 }
 
@@ -229,8 +229,8 @@ func TestRunCrashlogsClean_dryRunBeatsYesNeitherCallsRemoveNorPrompts(t *testing
 	if len(fc.RemoveCalls) != 0 {
 		t.Fatalf("RemoveCalls = %d, want 0", len(fc.RemoveCalls))
 	}
-	if !strings.Contains(stderr.String(), "Dry run — no changes made.") {
-		t.Fatalf("stderr missing dry-run notice; got:\n%s", stderr.String())
+	if !strings.Contains(stdout.String(), "Dry run — no changes made.") {
+		t.Fatalf("stdout missing dry-run notice; got:\n%s", stdout.String())
 	}
 }
 
@@ -253,8 +253,8 @@ func TestRunCrashlogsClean_yesFlagSkipsPromptAndRendersPlan(t *testing.T) {
 		Client: fc, Lister: fl, Prompter: fp,
 		Stdout: stdout, Stderr: stderr,
 	}, []string{"--yes"})
-	if !strings.Contains(stderr.String(), "Plan: ") {
-		t.Fatalf("stderr missing plan header (--yes must still render plan); got:\n%s", stderr.String())
+	if !strings.Contains(stdout.String(), "Plan: ") {
+		t.Fatalf("stdout missing plan header (--yes must still render plan); got:\n%s", stdout.String())
 	}
 }
 
@@ -299,11 +299,8 @@ func TestRunCrashlogsClean_successSummaryFormat(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if !strings.Contains(stderr.String(), "Deleted 1 of 1 files (1.0 KB freed). 0 failures.") {
-		t.Fatalf("stderr missing summary; got:\n%s", stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout should be empty; got:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "Deleted 1 of 1 files (1.0 KB freed). 0 failures.") {
+		t.Fatalf("stdout missing summary; got:\n%s", stdout.String())
 	}
 }
 
@@ -354,8 +351,8 @@ func TestRunCrashlogsClean_promptNoAbortsWithoutRemove(t *testing.T) {
 	if len(fc.RemoveCalls) != 0 {
 		t.Fatalf("RemoveCalls = %d, want 0", len(fc.RemoveCalls))
 	}
-	if !strings.Contains(stderr.String(), "Aborted.") {
-		t.Fatalf("stderr missing 'Aborted.'; got:\n%s", stderr.String())
+	if !strings.Contains(stdout.String(), "Aborted.") {
+		t.Fatalf("stdout missing 'Aborted.'; got:\n%s", stdout.String())
 	}
 }
 
@@ -384,8 +381,8 @@ func TestRunCrashlogsClean_promptEOFTreatedAsNo(t *testing.T) {
 	if len(fc.RemoveCalls) != 0 {
 		t.Fatalf("RemoveCalls = %d, want 0 on EOF path", len(fc.RemoveCalls))
 	}
-	if !strings.Contains(stderr.String(), "Aborted.") {
-		t.Fatalf("stderr missing 'Aborted.' on EOF; got:\n%s", stderr.String())
+	if !strings.Contains(stdout.String(), "Aborted.") {
+		t.Fatalf("stdout missing 'Aborted.' on EOF; got:\n%s", stdout.String())
 	}
 }
 
@@ -417,12 +414,11 @@ func TestRunCrashlogsClean_partialFailureSummaryAndNonZeroExit(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (partial failure)", code)
 	}
-	body := stderr.String()
-	if !strings.Contains(body, "Deleted 2 of 3 files (3.1 KB freed). 1 failures.") {
-		t.Fatalf("stderr missing summary; got:\n%s", body)
+	if !strings.Contains(stdout.String(), "Deleted 2 of 3 files (3.1 KB freed). 1 failures.") {
+		t.Fatalf("stdout missing summary; got:\n%s", stdout.String())
 	}
-	if !strings.Contains(body, "/c.ips: afc: permission denied") {
-		t.Fatalf("stderr missing per-failure detail; got:\n%s", body)
+	if !strings.Contains(stderr.String(), "/c.ips: afc: permission denied") {
+		t.Fatalf("stderr missing per-failure detail; got:\n%s", stderr.String())
 	}
 }
 

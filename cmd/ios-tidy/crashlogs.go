@@ -291,10 +291,14 @@ func runCrashlogsClean(ctx context.Context, deps runDeps, args []string) int {
 		actions = append(actions, ui.Action{Path: e.Path, Size: e.Size})
 	}
 	title := fmt.Sprintf("delete crash logs on %s (pattern %q)", udid, f.pattern)
-	totalBytes := ui.RenderPlan(deps.Stderr, title, actions)
+	// Plan + summary + dry-run/abort notices go to stdout so they're
+	// pipeable (e.g. `ios-tidy crashlogs clean --dry-run | tee plan.txt`);
+	// only the interactive prompt and real errors land on stderr. Matches
+	// the `apps clean` pattern.
+	totalBytes := ui.RenderPlan(deps.Stdout, title, actions)
 
 	if f.dryRun {
-		fmt.Fprintln(deps.Stderr, "Dry run — no changes made.")
+		fmt.Fprintln(deps.Stdout, "Dry run — no changes made.")
 		return 0
 	}
 
@@ -314,7 +318,7 @@ func runCrashlogsClean(ctx context.Context, deps runDeps, args []string) int {
 			return 1
 		}
 		if !ok {
-			fmt.Fprintln(deps.Stderr, "Aborted.")
+			fmt.Fprintln(deps.Stdout, "Aborted.")
 			return 0
 		}
 		proceed = true
@@ -334,7 +338,7 @@ func runCrashlogsClean(ctx context.Context, deps runDeps, args []string) int {
 			fmt.Fprintf(deps.Stderr, "remove crash logs: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(deps.Stderr, "Deleted %d of %d files (%s freed). %d failures.\n",
+		fmt.Fprintf(deps.Stdout, "Deleted %d of %d files (%s freed). %d failures.\n",
 			res.Removed, len(actions), ui.FormatBytes(uint64(res.Bytes)), len(res.Failures))
 		for _, fl := range res.Failures {
 			fmt.Fprintf(deps.Stderr, "  %s: %v\n", fl.Path, fl.Err)
