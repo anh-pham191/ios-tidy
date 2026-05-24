@@ -141,31 +141,60 @@ func (c *crashLogsClient) Pull(ctx context.Context, udid, pattern, dst string) (
 	return crashlogs.PullResult{Pulled: len(entries), Bytes: total}, nil
 }
 
+// Remove deletes crash log entries matching pattern on the device identified
+// by udid. It first lists matching entries (so it can report a removed-count
+// and a real bytes-freed figure), stats each entry to sum bytes, then calls
+// go-ios crashreport.RemoveReports once. RemoveReports does not return
+// per-file failures: if the whole call errors, nothing is reported as
+// removed and the error is returned; if it succeeds, every listed entry is
+// treated as removed and Failures is nil.
 func (c *crashLogsClient) Remove(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
 	if err := ctx.Err(); err != nil {
 		return crashlogs.RemoveResult{}, err
 	}
-	entries, err := c.List(ctx, udid, pattern)
+	entry, err := ios.GetDevice(udid)
 	if err != nil {
-		return crashlogs.RemoveResult{}, err
+		return crashlogs.RemoveResult{}, fmt.Errorf("get device %s: %w", udid, err)
 	}
-	device, err := findDevice(udid)
+
+	// Snapshot for the byte-freed total before removing. ListReports is the
+	// same call M3's List adapter uses; the result is shared between the
+	// size-sum and the reported Removed count so they always agree.
+	names, err := crashreport.ListReports(entry, pattern)
 	if err != nil {
-		return crashlogs.RemoveResult{}, err
+		return crashlogs.RemoveResult{}, fmt.Errorf("list before remove: %w", err)
 	}
-	if pattern == "" {
-		pattern = "*"
+
+	// Open our own AFC connection to crashreportcopymobile to stat each
+	// entry. Symmetric with how go-ios's own crashreport.ListReports /
+	// DownloadReports / RemoveReports construct an AFC client.
+	conn, err := ios.ConnectToService(entry, crashReportCopyMobileService)
+	if err != nil {
+		return crashlogs.RemoveResult{}, fmt.Errorf("connect %s: %w", crashReportCopyMobileService, err)
 	}
-	// crashreport.RemoveReports takes (device, cwd, pattern); cwd "" means
-	// the crash-report root. Removed/Bytes below come from the pre-list
-	// snapshot, not from what the device actually deleted — same caveat as
-	// Pull above.
-	if err := crashreport.RemoveReports(device, "", pattern); err != nil {
-		return crashlogs.RemoveResult{}, fmt.Errorf("remove reports: %w", err)
+	afcClient := afc.NewFromConn(conn)
+	defer func() { _ = afcClient.Close() }()
+
+	var bytes int64
+	for _, n := range names {
+		info, statErr := afcClient.Stat(n)
+		if statErr != nil {
+			// Best-effort: a stat miss is not fatal, but it does mean the
+			// bytes-freed total under-reports by that entry's size.
+			continue
+		}
+		// afc.FileInfo.Size is an int64 field (verified via `go doc
+		// github.com/danielpaulus/go-ios/ios/afc.FileInfo` against the
+		// pinned go-ios SHA — the API surface uses a field, not a method).
+		bytes += info.Size
 	}
-	var total int64
-	for _, e := range entries {
-		total += e.Size
+
+	if err := crashreport.RemoveReports(entry, "", pattern); err != nil {
+		return crashlogs.RemoveResult{}, fmt.Errorf("remove: %w", err)
 	}
-	return crashlogs.RemoveResult{Removed: len(entries), Bytes: total}, nil
+	return crashlogs.RemoveResult{
+		Removed:  len(names),
+		Bytes:    bytes,
+		Failures: nil,
+	}, nil
 }
