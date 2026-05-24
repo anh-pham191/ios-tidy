@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/anh-pham191/ios-tidy/internal/device"
 	"github.com/anh-pham191/ios-tidy/internal/iosbackend"
@@ -13,8 +15,13 @@ import (
 )
 
 func main() {
+	// Install a signal handler on the root context so Ctrl-C (SIGINT) and
+	// SIGTERM cancel long-running operations cleanly rather than killing
+	// the process mid-AFC-transfer.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	exit := dispatch(
-		context.Background(),
+		ctx,
 		os.Stdout, os.Stderr,
 		os.Args[1:],
 		iosbackend.NewDeviceLister(),
