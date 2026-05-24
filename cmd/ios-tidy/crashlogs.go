@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
+	iofs "io/fs"
 	"os"
 	"text/tabwriter"
 
@@ -181,7 +181,7 @@ func runCrashLogsPull(ctx context.Context, deps crashLogsDeps, args []string, st
 		for _, e := range entries {
 			dst := crashlogs.DestPath(*outFlag, e.Path)
 			_, statErr := os.Stat(dst)
-			if errors.Is(statErr, fs.ErrNotExist) {
+			if errors.Is(statErr, iofs.ErrNotExist) {
 				continue // no conflict
 			}
 			if statErr != nil {
