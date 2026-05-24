@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -444,10 +446,13 @@ func TestCrashLogsPull_relativePathRejected(t *testing.T) {
 }
 
 // TestCrashLogsPull_happyPath pins the success contract: with a valid
-// absolute path that exists, the handler dispatches to Client.Pull and
-// returns counts + dest.
+// absolute path inside the allow-root that exists, the handler dispatches
+// to Client.Pull and returns counts + dest. Uses IOS_TIDY_MCP_PULL_ROOT
+// to point the allow-root at t.TempDir() rather than $HOME so the test
+// is hermetic.
 func TestCrashLogsPull_happyPath(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", tmp)
 	fc := &crashlogs.FakeClient{
 		PullResult: crashlogs.PullResult{Pulled: 2, Bytes: 42},
 	}
@@ -477,6 +482,215 @@ func TestCrashLogsPull_happyPath(t *testing.T) {
 	}
 	if len(fc.PullCalls) != 1 || fc.PullCalls[0].Dst != tmp {
 		t.Errorf("PullCalls = %v, want one call with dst=%q", fc.PullCalls, tmp)
+	}
+}
+
+// ----------------------------------------------------------------------
+// crashlogs_pull — path-write hardening (H-2 + M-2)
+// ----------------------------------------------------------------------
+
+// TestCrashLogsPull_rejectsOutsideHome pins that a path outside the
+// allow-root is refused. Test uses a tmpdir root and asks to write to a
+// sibling directory (also under /var/folders but NOT under the root) so
+// the assertion is hermetic.
+func TestCrashLogsPull_rejectsOutsideHome(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir() // sibling, not under root
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", root)
+
+	deps := serverDeps{
+		Lister:    &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		CrashLogs: &crashlogs.FakeClient{},
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": outside,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for out outside allow-root; got: %s", extractText(res))
+	}
+	if !strings.Contains(extractText(res), "outside") {
+		t.Errorf("error must mention 'outside': %s", extractText(res))
+	}
+}
+
+// TestCrashLogsPull_rejectsSshDir pins that the deny-list catches the
+// .ssh subpath even when the path is otherwise inside the allow-root.
+// SSH keys live under ~/.ssh; a crashlog dump landing there could
+// overwrite or shadow them.
+func TestCrashLogsPull_rejectsSshDir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", root)
+	sshDir := filepath.Join(root, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+
+	deps := serverDeps{
+		Lister:    &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		CrashLogs: &crashlogs.FakeClient{},
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": sshDir,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for .ssh; got: %s", extractText(res))
+	}
+	if !strings.Contains(extractText(res), "sensitive") {
+		t.Errorf("error must mention 'sensitive': %s", extractText(res))
+	}
+}
+
+// TestCrashLogsPull_rejectsLaunchAgentsDir pins that the LaunchAgents
+// deny-list entry fires. A crashlog dump that overwrites a LaunchAgent
+// plist with arbitrary content is a persistence-mechanism foothold.
+func TestCrashLogsPull_rejectsLaunchAgentsDir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", root)
+	laDir := filepath.Join(root, "Library", "LaunchAgents")
+	if err := os.MkdirAll(laDir, 0o700); err != nil {
+		t.Fatalf("mkdir LaunchAgents: %v", err)
+	}
+
+	deps := serverDeps{
+		Lister:    &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		CrashLogs: &crashlogs.FakeClient{},
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": laDir,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for LaunchAgents; got: %s", extractText(res))
+	}
+}
+
+// TestCrashLogsPull_rejectsSensitiveNestedSubpath pins prefix-match
+// semantics: a deeper directory inside a sensitive root (e.g.
+// .ssh/old-keys) is just as forbidden as the root itself.
+func TestCrashLogsPull_rejectsSensitiveNestedSubpath(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", root)
+	nested := filepath.Join(root, "Library", "Keychains", "backup")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+
+	deps := serverDeps{
+		Lister:    &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		CrashLogs: &crashlogs.FakeClient{},
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": nested,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for nested Keychains subpath; got: %s", extractText(res))
+	}
+}
+
+// TestCrashLogsPull_rejectsSymlink pins that a symlink (even one whose
+// target is also inside the allow-root) is refused. Lstat catches it;
+// Stat would have followed the link and let it through.
+func TestCrashLogsPull_rejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", root)
+	target := filepath.Join(root, "real-target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "symlink-to-target")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	deps := serverDeps{
+		Lister:    &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		CrashLogs: &crashlogs.FakeClient{},
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": link,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for symlink; got: %s", extractText(res))
+	}
+	if !strings.Contains(extractText(res), "symlink") {
+		t.Errorf("error must mention 'symlink': %s", extractText(res))
+	}
+}
+
+// TestCrashLogsPull_acceptsValidAllowRootSubdir pins the positive case:
+// a real directory inside the allow-root proceeds.
+func TestCrashLogsPull_acceptsValidAllowRootSubdir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", root)
+	sub := filepath.Join(root, "crashes-out")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+
+	fc := &crashlogs.FakeClient{
+		PullResult: crashlogs.PullResult{Pulled: 1, Bytes: 1},
+	}
+	deps := serverDeps{
+		Lister:    &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		CrashLogs: fc,
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": sub,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("unexpected error result: %s", extractText(res))
+	}
+	if len(fc.PullCalls) != 1 {
+		t.Errorf("expected one Pull call; got: %v", fc.PullCalls)
+	}
+}
+
+// TestCrashLogsPull_envOverrideAllowsTestRoot confirms the env override
+// is honoured: without it, a /var/folders path would be outside $HOME on
+// macOS and the validation would refuse.
+func TestCrashLogsPull_envOverrideAllowsTestRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", root)
+
+	fc := &crashlogs.FakeClient{
+		PullResult: crashlogs.PullResult{Pulled: 0, Bytes: 0},
+	}
+	deps := serverDeps{
+		Lister:    &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		CrashLogs: fc,
+	}
+	h := newCrashLogsPullHandler(deps)
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		"out": root,
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if resultIsError(res) {
+		t.Fatalf("env override should allow root; got: %s", extractText(res))
 	}
 }
 
@@ -1071,6 +1285,7 @@ func TestCrashLogsClean_confirmedResultIncludesDeviceName(t *testing.T) {
 
 func TestCrashLogsPull_resultIncludesDeviceName(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("IOS_TIDY_MCP_PULL_ROOT", tmp)
 	fc := &crashlogs.FakeClient{
 		PullResult: crashlogs.PullResult{Pulled: 1, Bytes: 1},
 	}

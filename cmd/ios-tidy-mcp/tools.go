@@ -544,17 +544,22 @@ Args:
   udid (optional string): target device UDID. See devices_list rules.
   pattern (optional string): filepath.Match glob applied to filepath.Base
     of each entry. Default "*".
-  out (REQUIRED string): destination directory on the host. MUST be an
-    absolute path with no ".." segments. The directory must already
-    exist; this tool does not mkdir for you.
+  out (REQUIRED string): destination directory on the host. Hard rules:
+    - MUST be an absolute path.
+    - MUST be a real directory (NOT a symlink — symlinks are refused to
+      avoid TOCTOU / symlink-target confusion).
+    - MUST live inside $HOME (or the IOS_TIDY_MCP_PULL_ROOT override).
+    - MUST NOT be inside .ssh, .gnupg, Library/LaunchAgents,
+      Library/LaunchDaemons, Library/Keychains, or Library/Cookies.
+    The directory must already exist; this tool does not mkdir for you.
   force (optional bool): overwrite existing files at dst. Default false;
     matching files that already exist will surface as Pull failures.
 
-Returns: JSON {pulled, bytes, dest} on success. The on-disk layout
-preserves the device's relative paths under dest.`),
+Returns: JSON {pulled, bytes, dest, device} on success. The on-disk
+layout preserves the device's relative paths under dest.`),
 			mcp.WithString("udid", mcp.Description("target device UDID")),
 			mcp.WithString("pattern", mcp.Description("filepath.Match glob"), mcp.DefaultString("*")),
-			mcp.WithString("out", mcp.Description("destination directory on the host (REQUIRED, absolute path, no '..')")),
+			mcp.WithString("out", mcp.Description("destination directory on the host (REQUIRED, absolute path inside $HOME, no symlinks, no sensitive subpaths)")),
 			mcp.WithBoolean("force", mcp.Description("overwrite existing files"), mcp.DefaultBool(false)),
 		),
 		newCrashLogsPullHandler(deps),
@@ -811,35 +816,114 @@ type crashlogsPullResult struct {
 	Failures []crashlogs.Failure `json:"failures,omitempty"`
 }
 
-// validatePullOutPath enforces "absolute path with no '..' segments and the
-// directory already exists". Mirroring the CLI's behaviour (which calls
-// os.MkdirAll under runCrashLogsPull) is intentionally NOT done here — the
-// MCP caller cannot see a file-system error message the way a shell user
-// can, so we explicitly refuse non-absolute / non-existent destinations
-// rather than silently creating arbitrary host directories.
+// pullOutSensitiveSubpaths is the deny-list of $HOME-relative paths
+// crashlogs_pull will refuse to write into even when the allow-root
+// check would otherwise accept them. Each entry is a Clean'd path with
+// forward-slash separators; the runtime check uses filepath.ToSlash on
+// the candidate so the comparison works on Windows too even though the
+// production target is macOS.
+//
+// Order doesn't matter — the candidate is matched against all entries
+// with prefix-or-exact semantics. Add new entries as new attack surface
+// is identified (e.g. ".aws", "Library/Mobile Documents" for iCloud).
+var pullOutSensitiveSubpaths = []string{
+	".ssh",
+	".gnupg",
+	"Library/LaunchAgents",
+	"Library/LaunchDaemons",
+	"Library/Keychains",
+	"Library/Cookies",
+}
+
+// validatePullOutPath enforces a strict allow-root + deny-list contract:
+//
+//  1. out must be non-empty and absolute (filepath.IsAbs).
+//  2. out, after Clean, must contain no ".." segment (defensive — Clean
+//     already resolves these, but a literal ".." in the input is a sign
+//     the caller constructed the path incorrectly).
+//  3. out must live inside the allow-root. The root is $HOME by default,
+//     overridable via the IOS_TIDY_MCP_PULL_ROOT env var (tests use the
+//     override to point at t.TempDir() so they never depend on $HOME's
+//     real layout).
+//  4. out must not be (or be inside) one of the sensitive subpaths under
+//     the allow-root: .ssh, .gnupg, Library/LaunchAgents, etc.
+//  5. out must exist and be a real directory. Lstat (NOT Stat) is used
+//     so a symlink IS detected and rejected; following it via Stat would
+//     mask a symlink-to-/etc that bypasses the deny-list.
+//
+// Symlink rejection is intentionally absolute: even a symlink whose
+// target is also inside the allow-root is refused, because a TOCTOU
+// adversary can swap the target between the check and the downstream
+// Pull. Real directories don't have this problem.
 func validatePullOutPath(out string) error {
 	if out == "" {
-		return errors.New("crashlogs_pull: out is required")
+		return errors.New("crashlogs_pull: out is required (absolute path inside $HOME)")
 	}
 	if !filepath.IsAbs(out) {
 		return fmt.Errorf("crashlogs_pull: out %q must be an absolute path", out)
 	}
-	// Reject any ".." segment after cleaning. filepath.Clean does NOT escape
-	// the root, but a literal ".." in the input is still a sign the caller
-	// constructed the path incorrectly; bounce it back.
-	for _, seg := range strings.Split(filepath.Clean(out), string(filepath.Separator)) {
+	cleaned := filepath.Clean(out)
+	for _, seg := range strings.Split(cleaned, string(filepath.Separator)) {
 		if seg == ".." {
 			return fmt.Errorf("crashlogs_pull: out %q contains '..' segment", out)
 		}
 	}
-	info, err := os.Stat(out)
+
+	root, err := pullOutAllowRoot()
 	if err != nil {
-		return fmt.Errorf("crashlogs_pull: out %q: %w", out, err)
+		return fmt.Errorf("crashlogs_pull: %w", err)
+	}
+	root = filepath.Clean(root)
+	rel, err := filepath.Rel(root, cleaned)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("crashlogs_pull: out %q is outside the allow-root %q", cleaned, root)
+	}
+
+	relSlash := filepath.ToSlash(rel)
+	for _, deny := range pullOutSensitiveSubpaths {
+		if relSlash == deny || strings.HasPrefix(relSlash, deny+"/") {
+			return fmt.Errorf(
+				"crashlogs_pull: out %q is inside a sensitive subpath (%s); refusing",
+				cleaned, deny,
+			)
+		}
+	}
+
+	info, err := os.Lstat(cleaned)
+	if err != nil {
+		return fmt.Errorf("crashlogs_pull: out %q: %w", cleaned, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf(
+			"crashlogs_pull: out %q is a symlink; refusing to avoid TOCTOU / "+
+				"symlink-target confusion. Pass a real directory.",
+			cleaned,
+		)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("crashlogs_pull: out %q is not a directory", out)
+		return fmt.Errorf("crashlogs_pull: out %q is not a directory", cleaned)
 	}
 	return nil
+}
+
+// pullOutAllowRoot returns the directory crashlogs_pull's out must live
+// inside. Production: $HOME. Tests can override via the
+// IOS_TIDY_MCP_PULL_ROOT env var, which avoids both depending on the
+// developer's actual $HOME contents and accidentally writing to it.
+//
+// The env override is intentionally NOT documented as a user-facing
+// feature — it exists solely so the tests can exercise the allow-root
+// logic without polluting $HOME, and so power users running the server
+// inside a sandbox can point it at the sandbox-writable root.
+func pullOutAllowRoot() (string, error) {
+	if root := os.Getenv("IOS_TIDY_MCP_PULL_ROOT"); root != "" {
+		return root, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve $HOME: %w", err)
+	}
+	return home, nil
 }
 
 // newCrashLogsPullHandler returns the handler for crashlogs_pull.
