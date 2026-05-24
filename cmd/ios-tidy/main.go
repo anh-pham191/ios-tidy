@@ -82,7 +82,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "subcommands:")
 	fmt.Fprintln(w, "  devices    list connected iPhones")
 	fmt.Fprintln(w, "  storage    show device free/used + app sizes")
-	fmt.Fprintln(w, "  crashlogs  list and pull crash reports (read-only)")
+	fmt.Fprintln(w, "  crashlogs  list, pull, or clean crash reports")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "global flags:")
 	fmt.Fprintln(w, "  --version  print version and exit")
