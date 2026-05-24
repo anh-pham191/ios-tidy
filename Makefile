@@ -1,9 +1,10 @@
-.PHONY: test test-device test-cover lint build clean
+.PHONY: test test-device test-cover lint build build-mcp clean
 
 GO            ?= go
 PKG            = ./...
 BIN_DIR        = bin
 BIN            = $(BIN_DIR)/ios-tidy
+BIN_MCP        = $(BIN_DIR)/ios-tidy-mcp
 GIT_DESCRIBE  := $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
 LDFLAGS        = -s -w -X main.Version=$(GIT_DESCRIBE)
 
@@ -31,6 +32,10 @@ lint:
 build:
 	mkdir -p $(BIN_DIR)
 	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(BIN) ./cmd/ios-tidy
+
+build-mcp:
+	mkdir -p $(BIN_DIR)
+	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(BIN_MCP) ./cmd/ios-tidy-mcp
 
 clean:
 	rm -rf $(BIN_DIR) coverage.out
