@@ -503,6 +503,22 @@ func newAppsProbeHandler(deps serverDeps) server.ToolHandlerFunc {
 		if all && len(bundles) > 0 {
 			return mcp.NewToolResultError("apps_probe: all and bundles are mutually exclusive"), nil
 		}
+		// H-1 parity with apps_clean: refuse any non-printable-ASCII bundle
+		// up-front. The probe store is shared with the CLI binary; a
+		// Cyrillic homoglyph saved here would later pass the CLI's typed-
+		// bundle-ID gate by string equality while the destructive op targets
+		// a different (or non-existent) bundle. Reject the WHOLE probe run
+		// on first offender so the on-disk cache stays ASCII-clean by
+		// construction.
+		for _, bid := range bundles {
+			if !isPrintableASCII(bid) {
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"apps_probe: bundle %q contains non-printable-ASCII rune %U; refusing for safety. "+
+						"Apple bundle IDs are reverse-DNS (ASCII letters, digits, '-', '.').",
+					bid, firstNonASCIIRune(bid),
+				)), nil
+			}
+		}
 		if deps.Prober == nil {
 			return mcp.NewToolResultError("apps_probe: server has no Prober wired"), nil
 		}
@@ -780,33 +796,14 @@ func isAppleSystemBundle(bundleID string) bool {
 	return strings.HasPrefix(bundleID, "com.apple.")
 }
 
-// isPrintableASCII reports whether every rune in s is in the printable
-// ASCII range [0x20, 0x7E]. Apple bundle IDs are reverse-DNS; the rule
-// is "ASCII letters, digits, hyphen, and dot". Anything outside that
-// strict range (Cyrillic homoglyphs, NULs, RTL overrides, smart quotes)
-// is either a typo or an injection attempt — refuse before any device
-// I/O so the gate cannot be tricked by a Unicode lookalike of the
-// expected bundle ID.
-func isPrintableASCII(s string) bool {
-	for _, r := range s {
-		if r < 0x20 || r > 0x7E {
-			return false
-		}
-	}
-	return true
-}
-
-// firstNonASCIIRune returns the first non-printable-ASCII rune in s,
-// suitable for embedding in an error message with %U so the caller (and
-// auditor) sees exactly which codepoint triggered the refusal.
-func firstNonASCIIRune(s string) rune {
-	for _, r := range s {
-		if r < 0x20 || r > 0x7E {
-			return r
-		}
-	}
-	return 0
-}
+// isPrintableASCII / firstNonASCIIRune were lifted to internal/cmdutil
+// so the CLI binary (cmd/ios-tidy) shares the same homograph defence.
+// Aliases kept so existing call sites in this file stay untouched —
+// see internal/cmdutil/ascii.go for the rationale.
+var (
+	isPrintableASCII  = cmdutil.IsPrintableASCII
+	firstNonASCIIRune = cmdutil.FirstNonASCIIRune
+)
 
 // dryRunArgConservative reads dry_run from the request without using
 // mcp-go's GetBool, which coerces the JSON string "false" to bool false
@@ -1099,7 +1096,11 @@ func probeVendedInResults(results []apps.ProbeResult, bundleID string) bool {
 func newAppsCleanHandler(deps serverDeps) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		override := req.GetString("udid", "")
-		bundleID := req.GetString("bundle_id", "")
+		// L-1: trim bundle_id at read time so a stray leading/trailing
+		// space in the JSON arg doesn't later defeat the equality gate
+		// against confirm_bundle_id (which is also trimmed). Apple bundle
+		// IDs are reverse-DNS; whitespace is never significant.
+		bundleID := strings.TrimSpace(req.GetString("bundle_id", ""))
 		confirmBundleID := req.GetString("confirm_bundle_id", "")
 		includeTmp := req.GetBool("include_tmp", false)
 		includeCaches := req.GetBool("include_caches", false)

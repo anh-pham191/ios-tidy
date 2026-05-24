@@ -201,6 +201,42 @@ func TestAppsListTool_listerError(t *testing.T) {
 	}
 }
 
+// TestAppsProbeMCP_rejectsHomoglyph pins H-1 parity with apps_clean on the
+// probe surface. The shared probe store is the bridge between MCP and CLI;
+// a homoglyph saved here would defeat the CLI's typed-bundle-ID gate
+// downstream. The handler MUST refuse the whole probe run on first
+// offender, BEFORE any device I/O or Save() call.
+func TestAppsProbeMCP_rejectsHomoglyph(t *testing.T) {
+	fakeSb := sandbox.NewFakeSandbox()
+	store := &fakeProbeStore{}
+	deps := serverDeps{
+		Lister:     &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Apps:       &apps.FakeLister{Apps: []apps.App{{BundleID: "com.example.app"}}},
+		Sandbox:    fakeSb,
+		Prober:     apps.NewProber(fakeSb),
+		ProbeStore: store,
+	}
+	h := newAppsProbeHandler(deps)
+
+	res, err := h(context.Background(), callToolRequestWithArgs(map[string]any{
+		// "com.exаmple.app" — Cyrillic 'а' (U+0430).
+		"bundles": []any{"com.exаmple.app"},
+		"timeout": "1s",
+	}))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !resultIsError(res) {
+		t.Fatalf("expected error result for non-ASCII bundle; got: %s", extractText(res))
+	}
+	if !strings.Contains(extractText(res), "non-printable-ASCII") {
+		t.Errorf("expected error to mention non-printable-ASCII; got: %s", extractText(res))
+	}
+	if len(store.saved) != 0 {
+		t.Errorf("ProbeStore.Save must not be called when ASCII gate refuses; saved=%+v", store.saved)
+	}
+}
+
 func TestAppsProbeTool_persistsAndReturnsResults(t *testing.T) {
 	fakeSb := sandbox.NewFakeSandbox()
 	fakeSb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})

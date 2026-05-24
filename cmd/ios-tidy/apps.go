@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/anh-pham191/ios-tidy/internal/apps"
+	"github.com/anh-pham191/ios-tidy/internal/cmdutil"
 	"github.com/anh-pham191/ios-tidy/internal/device"
 	"github.com/anh-pham191/ios-tidy/internal/sandbox"
 	"github.com/anh-pham191/ios-tidy/internal/ui"
@@ -118,7 +119,24 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 		fmt.Fprintln(deps.Stderr, "usage: ios-tidy apps clean BUNDLE_ID [flags]")
 		return 2
 	}
-	bundleID := positionals[0]
+	// L-1: trim the positional at parse time. A pasted bundle with leading
+	// or trailing whitespace must not later defeat the typed-bundle-ID
+	// gate (which TrimSpaces the user input). Apple bundle IDs are
+	// reverse-DNS — whitespace is never significant.
+	bundleID := strings.TrimSpace(positionals[0])
+
+	// H-1 parity with MCP: refuse non-printable-ASCII before any device
+	// I/O so a Cyrillic homoglyph in the positional cannot poison the
+	// shared probe store. The CLI uses a typed-bundle-ID gate downstream
+	// for Documents/, but that gate compares by string equality — a
+	// homoglyph pair would pass it. Reject up-front instead.
+	if !cmdutil.IsPrintableASCII(bundleID) {
+		fmt.Fprintf(deps.Stderr,
+			"error: refusing to clean: bundle_id %q contains non-printable-ASCII rune %U; "+
+				"Apple bundle IDs are reverse-DNS, always ASCII.\n",
+			bundleID, cmdutil.FirstNonASCIIRune(bundleID))
+		return 1
+	}
 
 	// Defense-in-depth hard reject: never touch a system-app sandbox even
 	// if the probe store somehow carried a Vended outcome for it (test
@@ -527,6 +545,19 @@ func (c *appsProbeCmd) run(ctx context.Context, args []string) error {
 	}
 	if *all && len(bundles) > 0 {
 		return errors.New("apps probe: --all and --bundle are mutually exclusive")
+	}
+	// H-1 parity with MCP: refuse non-printable-ASCII bundles before any
+	// device I/O. The probe store is shared with `apps clean`; a homoglyph
+	// saved here would later defeat the typed-bundle-ID gate. Reject the
+	// WHOLE probe run on first offender so the store stays ASCII-clean by
+	// construction.
+	for _, b := range bundles {
+		if !cmdutil.IsPrintableASCII(b) {
+			return fmt.Errorf(
+				"apps probe: --bundle %q contains non-printable-ASCII rune %U; "+
+					"Apple bundle IDs are reverse-DNS, always ASCII",
+				b, cmdutil.FirstNonASCIIRune(b))
+		}
 	}
 
 	udid, err := resolveDevice(ctx, c.deps.Devices, *deviceFlag, c.deps.Stderr)

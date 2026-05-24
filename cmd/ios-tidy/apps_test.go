@@ -268,6 +268,39 @@ func TestAppsProbe_jsonOutputShape(t *testing.T) {
 	}
 }
 
+// TestAppsProbe_rejectsHomoglyphInCLI pins the CLI's parity with the MCP
+// apps_probe handler: a non-printable-ASCII --bundle value must refuse the
+// WHOLE probe run BEFORE any device I/O. The probe store is shared with
+// `apps clean`; a Cyrillic homoglyph saved here would defeat the typed-
+// bundle-ID gate downstream. trapSandbox is wired so any Sandbox.Open call
+// fails the test loudly.
+func TestAppsProbe_rejectsHomoglyphInCLI(t *testing.T) {
+	// lister/sandbox are present but should never be consulted — the
+	// ASCII gate must short-circuit before resolveDevice / list / probe.
+	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.example.app"}}}
+	store := &fakeProbeStore{}
+
+	cmd := newAppsProbeCmd(appsDeps{
+		Lister:  lister,
+		Sandbox: sandbox.NewFakeSandbox(),
+		Store:   store,
+		Stdout:  &bytes.Buffer{},
+		Devices: probeDevs(),
+	})
+	// "com.exаmple.app" — Cyrillic 'а' at offset 5.
+	err := cmd.run(context.Background(),
+		[]string{"--device", "UDID", "--bundle", "com.exаmple.app"})
+	if err == nil {
+		t.Fatal("expected error for non-ASCII --bundle; got nil")
+	}
+	if !strings.Contains(err.Error(), "non-printable-ASCII") {
+		t.Errorf("err = %q; want mention of non-printable-ASCII", err.Error())
+	}
+	if store.SaveCalls != 0 {
+		t.Errorf("ProbeStore.Save must not be called when ASCII gate refuses; SaveCalls=%d", store.SaveCalls)
+	}
+}
+
 func TestAppsProbe_exitsZeroEvenIfAllRefused(t *testing.T) {
 	lister := &apps.FakeLister{Apps: []apps.App{{BundleID: "com.a"}}}
 	sb := sandbox.NewFakeSandbox()

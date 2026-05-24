@@ -1043,3 +1043,57 @@ func TestAppsClean_zeroDevicesExits0(t *testing.T) {
 		t.Errorf("stderr should explain why nothing was done; got: %q", stderr.String())
 	}
 }
+
+// TestAppsClean_rejectsHomoglyphBundleIDInCLI pins cross-surface parity with
+// the MCP handler's H-1 defence. The third character is Cyrillic 'а'
+// (U+0430), a homograph for ASCII 'a'. The CLI MUST refuse BEFORE loading
+// the probe store and BEFORE calling Sandbox.Open — otherwise a homoglyph
+// pasted into the positional could poison the shared probe cache that the
+// MCP server also consults.
+func TestAppsClean_rejectsHomoglyphBundleIDInCLI(t *testing.T) {
+	// trapStore makes the test loud if the probe-load runs in spite of the
+	// gate. loadErr is wrapped so the error string is distinctive.
+	store := &loadingProbeStore{LoadErr: errors.New("probe load must not run — ASCII gate must short-circuit first")}
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Devices: &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox: &trapSandbox{t: t},
+		Store:   store,
+	}, []string{"com.exаmple.app", "--device", "U1"}) // U+0430
+
+	if exit == 0 {
+		t.Fatalf("exit = 0, want non-zero (homoglyph must be refused)")
+	}
+	if !strings.Contains(stderr.String(), "non-printable-ASCII") {
+		t.Errorf("stderr should mention non-printable-ASCII; got: %q", stderr.String())
+	}
+}
+
+// TestAppsClean_trimsLeadingWhitespaceInBundleID pins L-1: a pasted bundle
+// with a leading space MUST be trimmed at parse time so the downstream
+// typed-bundle-ID gate doesn't reject a clean ID the user typed. Without
+// the trim, bundleID would be " com.example.app" and typing
+// "com.example.app" would fail the strict equality check.
+func TestAppsClean_trimsLeadingWhitespaceInBundleID(t *testing.T) {
+	fakeFS, sb, store := docsFixture()
+	fp := &ui.FakePrompter{Lines: []string{"com.example.app"}}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--include-documents", " com.example.app"})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fakeFS.RemoveCalls) != 2 {
+		t.Errorf("RemoveCalls = %v, want 2 (trim ran, typed gate matched)", fakeFS.RemoveCalls)
+	}
+}
