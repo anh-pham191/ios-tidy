@@ -291,5 +291,35 @@ func runCrashlogsClean(ctx context.Context, deps runDeps, args []string) int {
 		fmt.Fprintln(deps.Stderr, "No matching crash logs.")
 		return 0
 	}
+
+	actions := make([]ui.Action, 0, len(entries))
+	for _, e := range entries {
+		actions = append(actions, ui.Action{Path: e.Path, Size: e.Size})
+	}
+	title := fmt.Sprintf("delete crash logs on %s (pattern %q)", udid, f.pattern)
+	totalBytes := ui.RenderPlan(deps.Stderr, title, actions)
+
+	if f.dryRun {
+		fmt.Fprintln(deps.Stderr, "Dry run — no changes made.")
+		return 0
+	}
+
+	// promptNoun selects between "file" and "files" so the prompt reads
+	// naturally for n == 1.
+	noun := "files"
+	if len(actions) == 1 {
+		noun = "file"
+	}
+	question := fmt.Sprintf("Delete %d %s (%s) from device %s? [y/N]",
+		len(actions), noun, ui.FormatBytes(uint64(totalBytes)), udid)
+	ok, err := deps.Prompter.Confirm(ctx, question)
+	if err != nil {
+		fmt.Fprintf(deps.Stderr, "prompt: %v\n", err)
+		return 1
+	}
+	if !ok {
+		fmt.Fprintln(deps.Stderr, "Aborted.")
+		return 0
+	}
 	return 0
 }
