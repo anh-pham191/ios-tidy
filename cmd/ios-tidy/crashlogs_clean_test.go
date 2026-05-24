@@ -232,3 +232,76 @@ func TestRunCrashlogsClean_dryRunBeatsYesNeitherCallsRemoveNorPrompts(t *testing
 		t.Fatalf("stderr missing dry-run notice; got:\n%s", stderr.String())
 	}
 }
+
+func TestRunCrashlogsClean_yesFlagSkipsPromptAndRendersPlan(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		return crashlogs.RemoveResult{Removed: 1, Bytes: 1024}, nil
+	}
+	fp.ConfirmFn = func(ctx context.Context, q string) (bool, error) {
+		t.Fatalf("Prompter must not be called when --yes is set")
+		return false, nil
+	}
+	_ = runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{"--yes"})
+	if !strings.Contains(stderr.String(), "Plan: ") {
+		t.Fatalf("stderr missing plan header (--yes must still render plan); got:\n%s", stderr.String())
+	}
+}
+
+func TestRunCrashlogsClean_yesCallsRemoveOnceWithUDIDAndPattern(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		return crashlogs.RemoveResult{Removed: 1, Bytes: 1024}, nil
+	}
+	_ = runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{"--yes", "--pattern=*.ips"})
+	if len(fc.RemoveCalls) != 1 {
+		t.Fatalf("RemoveCalls = %d, want 1", len(fc.RemoveCalls))
+	}
+	if fc.RemoveCalls[0].UDID != "ABC123" || fc.RemoveCalls[0].Pattern != "*.ips" {
+		t.Fatalf("RemoveCalls[0] = %+v, want {UDID:ABC123 Pattern:*.ips}", fc.RemoveCalls[0])
+	}
+}
+
+func TestRunCrashlogsClean_successSummaryFormat(t *testing.T) {
+	fc, fl, fp, stdout, stderr := newCleanEnv()
+	fl.ListFn = func(ctx context.Context) ([]device.Device, error) {
+		return []device.Device{{UDID: "ABC123"}}, nil
+	}
+	fc.ListFn = func(ctx context.Context, udid, pattern string) ([]crashlogs.Entry, error) {
+		return []crashlogs.Entry{{Path: "/a.ips", Size: 1024}}, nil
+	}
+	fc.RemoveFn = func(ctx context.Context, udid, pattern string) (crashlogs.RemoveResult, error) {
+		return crashlogs.RemoveResult{Removed: 1, Bytes: 1024}, nil
+	}
+	code := runCrashlogsClean(context.Background(), runDeps{
+		Client: fc, Lister: fl, Prompter: fp,
+		Stdout: stdout, Stderr: stderr,
+	}, []string{"--yes"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(stderr.String(), "Deleted 1 of 1 files (1.0 KB freed). 0 failures.") {
+		t.Fatalf("stderr missing summary; got:\n%s", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout should be empty; got:\n%s", stdout.String())
+	}
+}

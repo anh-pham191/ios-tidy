@@ -263,16 +263,10 @@ func parseCleanFlags(stderr io.Writer, args []string) (cleanFlags, error) {
 	return f, nil
 }
 
-// runCrashlogsClean dispatches the `crashlogs clean` subcommand. It returns
-// the process exit code (0 = success, non-zero = error or partial failure).
-//
-// Current scope (M4 Tasks 5/5a/6):
-//   - parse flags (unknown flag → exit 2)
-//   - resolve device (no device / multiple devices → exit 1)
-//   - list entries; on List error → exit 1
-//   - empty entries → print "No matching crash logs." to stderr, exit 0
-//
-// Plan rendering, prompt, and Remove are wired in subsequent tasks.
+// runCrashlogsClean executes the crashlogs clean subcommand:
+// parse flags → resolve device → list entries → empty-short-circuit →
+// render plan → dry-run short-circuit → prompt or --yes → on proceed,
+// call Client.Remove and report results.
 func runCrashlogsClean(ctx context.Context, deps runDeps, args []string) int {
 	f, err := parseCleanFlags(deps.Stderr, args)
 	if err != nil {
@@ -312,14 +306,38 @@ func runCrashlogsClean(ctx context.Context, deps runDeps, args []string) int {
 	}
 	question := fmt.Sprintf("Delete %d %s (%s) from device %s? [y/N]",
 		len(actions), noun, ui.FormatBytes(uint64(totalBytes)), udid)
-	ok, err := deps.Prompter.Confirm(ctx, question)
-	if err != nil {
-		fmt.Fprintf(deps.Stderr, "prompt: %v\n", err)
-		return 1
+	proceed := f.yes
+	if !proceed {
+		ok, err := deps.Prompter.Confirm(ctx, question)
+		if err != nil {
+			fmt.Fprintf(deps.Stderr, "prompt: %v\n", err)
+			return 1
+		}
+		if !ok {
+			fmt.Fprintln(deps.Stderr, "Aborted.")
+			return 0
+		}
+		proceed = true
 	}
-	if !ok {
-		fmt.Fprintln(deps.Stderr, "Aborted.")
-		return 0
+	// Destructive boundary. The `if proceed` is intentionally redundant with
+	// the gate above (which already `return`s on every non-proceed path).
+	// Keep both guards: the outer `if` makes the destructive call visually
+	// distinct so a future refactor that flattens the prompt block cannot
+	// silently invert the gate. Do not "simplify" by removing it.
+	if proceed {
+		res, err := deps.Client.Remove(ctx, udid, f.pattern)
+		if err != nil {
+			fmt.Fprintf(deps.Stderr, "remove crash logs: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(deps.Stderr, "Deleted %d of %d files (%s freed). %d failures.\n",
+			res.Removed, len(actions), ui.FormatBytes(uint64(res.Bytes)), len(res.Failures))
+		for _, fl := range res.Failures {
+			fmt.Fprintf(deps.Stderr, "  %s: %v\n", fl.Path, fl.Err)
+		}
+		if len(res.Failures) > 0 {
+			return 1
+		}
 	}
 	return 0
 }
