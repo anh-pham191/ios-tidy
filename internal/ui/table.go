@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // RenderTable writes a left-aligned, space-padded table to w. Column
@@ -20,11 +21,11 @@ import (
 func RenderTable(w io.Writer, header []string, rows [][]string) error {
 	widths := make([]int, len(header))
 	for i, h := range header {
-		widths[i] = len(h)
+		widths[i] = utf8.RuneCountInString(h)
 	}
 	for _, r := range rows {
 		for i := 0; i < len(widths) && i < len(r); i++ {
-			if l := len(r[i]); l > widths[i] {
+			if l := utf8.RuneCountInString(r[i]); l > widths[i] {
 				widths[i] = l
 			}
 		}
@@ -118,12 +119,12 @@ func (t *Table) String() string {
 func (t *Table) Render(aligns []Alignment) string {
 	widths := make([]int, len(t.header))
 	for i, h := range t.header {
-		widths[i] = len(h)
+		widths[i] = utf8.RuneCountInString(h)
 	}
 	for _, r := range t.rows {
 		for i, c := range r {
-			if i < len(widths) && len(c) > widths[i] {
-				widths[i] = len(c)
+			if i < len(widths) && utf8.RuneCountInString(c) > widths[i] {
+				widths[i] = utf8.RuneCountInString(c)
 			}
 		}
 	}
@@ -141,7 +142,7 @@ func (t *Table) Render(aligns []Alignment) string {
 			if i > 0 {
 				b.WriteString("  ")
 			}
-			pad := widths[i] - len(c)
+			pad := widths[i] - utf8.RuneCountInString(c)
 			if pad < 0 {
 				pad = 0
 			}
