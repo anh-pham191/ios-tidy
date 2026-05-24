@@ -11,6 +11,7 @@
 //   - apps_probe                  (read-only; persists results to the shared cache)
 //   - storage_recommendations     (read-only synthesis layer; v0.3.0)
 //   - apps_offload_candidates     (read-only; size-ranked app list with offload metadata; v0.3.0)
+//   - open_app_storage_settings   (read-only; emits Settings deep-link URL + manual steps; v0.3.0)
 //   - crashlogs_pull              (non-destructive on device; writes to host)
 //   - crashlogs_clean             (DESTRUCTIVE; default dry-run, confirm=true required)
 //   - apps_clean                  (DESTRUCTIVE; probe-gated, typed-bundle-ID confirmation)

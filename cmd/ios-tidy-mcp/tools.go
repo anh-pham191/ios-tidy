@@ -388,6 +388,42 @@ Returns: JSON array sorted by totalBytes desc.`),
 		),
 		newAppsOffloadCandidatesHandler(deps),
 	)
+
+	s.AddTool(
+		mcp.NewTool("open_app_storage_settings",
+			mcp.WithDescription(`Emit the iOS Settings deep-link URL that opens the per-app storage
+page (Settings → General → iPhone Storage → <app>), where the user can
+tap Offload App.
+
+IMPORTANT — this tool CANNOT trigger the Settings page directly. Apple
+does not expose URL-opening to USB-attached host tools (go-ios v1.0.213
+has no OpenURL / equivalent service), and ios-tidy will not launch
+arbitrary apps or send arbitrary URLs.
+
+What it returns is the URL plus step-by-step manual instructions to
+share with the user. Action in the JSON result will always be
+"manual-required" in the current implementation.
+
+Safety:
+  - bundle_id MUST be printable ASCII (reverse-DNS only).
+  - com.apple.* bundle IDs are rejected (consistency with apps_clean).
+  - The URL format is hard-coded — this tool emits ONLY
+    "prefs:root=STORAGE_MGMT_USAGE/<bundleID>". It cannot be used to
+    construct or send any other URL.
+
+Args:
+  udid (optional string): target device UDID. Used to echo the
+    {udid, name} stamp on the result so the LLM caller can confirm
+    the same device the user identified.
+  bundle_id (REQUIRED string): the third-party app's bundle ID.
+
+Returns: JSON object {action, url, bundleID, appName?, instructions, device}.`),
+			mcp.WithString("udid", mcp.Description("target device UDID")),
+			mcp.WithString("bundle_id", mcp.Description("the third-party app's bundle ID (REQUIRED)")),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		newOpenAppStorageSettingsHandler(deps),
+	)
 }
 
 // offloadCandidateRow is the JSON shape returned per element by
@@ -526,6 +562,12 @@ func newAppsOffloadCandidatesHandler(deps serverDeps) server.ToolHandlerFunc {
 					"updated sizes since boot — re-run after launching apps.")
 		}
 		apps.Sort(candidates)
+		if allZero {
+			// apps.Sort sorts desc-by-size which is meaningless when
+			// all sizes are equal; tie-break is BundleID asc, which is
+			// what we want here.
+			_ = candidates // sort already stable on bundleID asc tie-break
+		}
 
 		// min_bytes filter. Applied AFTER sort so the row order stays
 		// consistent across calls with and without a filter.
@@ -556,6 +598,115 @@ func newAppsOffloadCandidatesHandler(deps serverDeps) server.ToolHandlerFunc {
 			}
 		}
 		return jsonResult(rows)
+	}
+}
+
+// openAppStorageSettingsResult is the JSON shape returned by
+// open_app_storage_settings. Kept named (not anonymous) so handler
+// tests can decode into it directly.
+type openAppStorageSettingsResult struct {
+	Action       string    `json:"action"`
+	URL          string    `json:"url"`
+	BundleID     string    `json:"bundleID"`
+	AppName      string    `json:"appName,omitempty"`
+	Instructions string    `json:"instructions"`
+	Device       deviceRef `json:"device"`
+}
+
+// storageMgmtURL returns the hard-coded Settings deep-link URL for a
+// bundle ID. NOT a general-purpose URL constructor — the prefix and
+// path segment are pinned here so this tool cannot be repurposed to
+// emit any other URL even if the caller tries.
+//
+// The bundle ID is appended after a single slash; that's the format
+// iOS Settings expects (verified in iOS 17 / 18 against the
+// STORAGE_MGMT_USAGE preference root). The bundle ID has already been
+// printable-ASCII validated by the caller.
+func storageMgmtURL(bundleID string) string {
+	return "prefs:root=STORAGE_MGMT_USAGE/" + bundleID
+}
+
+// openAppStorageInstructions returns the human-readable steps for the
+// user. Templated with the app's display name when available so the
+// caller can paste the message verbatim.
+func openAppStorageInstructions(appName string) string {
+	target := appName
+	if target == "" {
+		target = "the app"
+	}
+	return "iOS does not allow USB-attached host tools to trigger Settings " +
+		"deep-links directly. To offload this app yourself:\n" +
+		"  1. Pick up your iPhone.\n" +
+		"  2. Open Settings → General → iPhone Storage.\n" +
+		"  3. Tap on " + target + ".\n" +
+		"  4. Tap 'Offload App' (preserves your data) or 'Delete App' " +
+		"(removes the app and its data)."
+}
+
+// newOpenAppStorageSettingsHandler returns the handler for the
+// open_app_storage_settings tool.
+//
+// Investigation result (2026-05): go-ios v1.0.213 does NOT expose any
+// OpenURL / send-URL-to-device capability. Searched:
+//   - ios/springboard/  (icon listing only; no launch / URL)
+//   - ios/appservice/   (LaunchApp by bundle ID for iOS17+; no URL arg)
+//   - ios/instruments/  (ProcessControl.LaunchApp by bundle ID; no URL)
+//   - tree-wide grep    (no "OpenURL", "openurl", "prefs:root", etc.)
+//
+// The tool therefore always returns action="manual-required". The URL
+// is hard-coded via storageMgmtURL and validated bundle ID — there is
+// no code path that can emit any other URL, even with adversarial args.
+func newOpenAppStorageSettingsHandler(deps serverDeps) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		override := req.GetString("udid", "")
+		bundleID := strings.TrimSpace(req.GetString("bundle_id", ""))
+
+		if bundleID == "" {
+			return mcp.NewToolResultError("open_app_storage_settings: bundle_id is required"), nil
+		}
+		if !isPrintableASCII(bundleID) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"open_app_storage_settings: bundle_id contains non-printable-ASCII rune %U; refusing for safety. "+
+					"Apple bundle IDs are reverse-DNS (ASCII letters, digits, '-', '.').",
+				firstNonASCIIRune(bundleID),
+			)), nil
+		}
+		if isAppleSystemBundle(bundleID) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"open_app_storage_settings: refusing system bundle %q. "+
+					"This tool only emits URLs for third-party app storage pages.",
+				bundleID,
+			)), nil
+		}
+
+		udid, devName, resolved := resolveDeviceRef(ctx, deps, override)
+		if resolved != nil {
+			return resolved, nil
+		}
+
+		// Best-effort app-name lookup so the instructions can name the
+		// target app. Failure here is non-fatal — the URL + generic
+		// instructions are still emitted.
+		appName := ""
+		if deps.Apps != nil {
+			if list, err := deps.Apps.UserApps(ctx, udid); err == nil {
+				for _, a := range list {
+					if a.BundleID == bundleID {
+						appName = a.Name
+						break
+					}
+				}
+			}
+		}
+
+		return jsonResult(openAppStorageSettingsResult{
+			Action:       "manual-required",
+			URL:          storageMgmtURL(bundleID),
+			BundleID:     bundleID,
+			AppName:      appName,
+			Instructions: openAppStorageInstructions(appName),
+			Device:       deviceRef{UDID: udid, Name: devName},
+		})
 	}
 }
 
