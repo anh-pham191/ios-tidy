@@ -4,19 +4,26 @@ package ui
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 )
 
-// Prompter asks the user a yes/no question.
+// Prompter asks the user a question.
 //
 // Confirm returns (true, nil) only on a clean yes; (false, nil) on no, empty
 // input, or EOF; (false, err) only on a non-EOF read error or context
 // cancellation. Default-no — never default-yes.
+//
+// ReadLine reads one full line and returns it with trailing CR/LF stripped.
+// EOF with no bytes returns ("", nil). Context cancellation returns ("",
+// ctx.Err()). Used by the strict typed-bundle-ID gate for
+// `apps clean --include-documents`.
 type Prompter interface {
 	Confirm(ctx context.Context, question string) (bool, error)
+	ReadLine(ctx context.Context, prompt string) (string, error)
 }
 
 // stdinPrompter reads from r and writes the question to w.
@@ -82,6 +89,36 @@ func (p *stdinPrompter) Confirm(ctx context.Context, question string) (bool, err
 	}
 }
 
+// ReadLine prints prompt+" " to w and reads one line from r, applying the
+// same context-cancellable goroutine pattern as Confirm. Trailing CR/LF is
+// stripped. EOF with no bytes returns ("", nil); cancellation returns
+// ("", ctx.Err()).
+func (p *stdinPrompter) ReadLine(ctx context.Context, prompt string) (string, error) {
+	fmt.Fprintf(p.w, "%s ", prompt)
+
+	type readResult struct {
+		line string
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		br := bufio.NewReader(p.r)
+		line, err := br.ReadString('\n')
+		ch <- readResult{line: line, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case res := <-ch:
+		if res.err != nil && res.err != io.EOF {
+			return "", res.err
+		}
+		// EOF with no bytes → "" + nil. Otherwise strip trailing CR/LF.
+		return strings.TrimRight(res.line, "\r\n"), nil
+	}
+}
+
 // FakePrompter is a deterministic Prompter for tests.
 //
 // There are two modes:
@@ -99,6 +136,14 @@ type FakePrompter struct {
 	// invoked per call. Tests that need to assert "Confirm must not be
 	// called" can set this to a function that calls t.Fatalf.
 	ConfirmFn func(ctx context.Context, question string) (bool, error)
+	// Lines is the FIFO queue of ReadLine return values, recorded prompts
+	// land in AskedLines. ReadLineErr is returned (with "" as the value)
+	// for every ReadLine call when non-nil. ReadLineFn, when set, takes
+	// precedence over Lines and ReadLineErr.
+	Lines       []string
+	AskedLines  []string
+	ReadLineErr error
+	ReadLineFn  func(ctx context.Context, prompt string) (string, error)
 }
 
 // NewFakePrompter returns a FakePrompter pre-loaded with the given answers.
@@ -119,4 +164,25 @@ func (f *FakePrompter) Confirm(ctx context.Context, question string) (bool, erro
 	ans := f.answers[0]
 	f.answers = f.answers[1:]
 	return ans, nil
+}
+
+// ReadLine records the prompt and dispatches to ReadLineFn (if set), then
+// ReadLineErr (if set), then the queued-line path. Unlike Confirm, which
+// panics on exhaustion, ReadLine returns an error so the typed-bundle-ID
+// gate tests can assert the cmd path printed the right "did not match"
+// message rather than the test crashing on a panic.
+func (f *FakePrompter) ReadLine(ctx context.Context, prompt string) (string, error) {
+	f.AskedLines = append(f.AskedLines, prompt)
+	if f.ReadLineFn != nil {
+		return f.ReadLineFn(ctx, prompt)
+	}
+	if f.ReadLineErr != nil {
+		return "", f.ReadLineErr
+	}
+	if len(f.Lines) == 0 {
+		return "", errors.New("FakePrompter: no more queued lines")
+	}
+	line := f.Lines[0]
+	f.Lines = f.Lines[1:]
+	return line, nil
 }

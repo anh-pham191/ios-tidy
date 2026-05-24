@@ -415,6 +415,175 @@ func TestAppsClean_partialFailureReportsAndExitsNonZero(t *testing.T) {
 	}
 }
 
+// docsFixture returns a fake FS/sandbox/store wired for the Documents tests.
+// The FakeFS seeds Documents/ Walk entries so BuildPlan finds files; the store
+// is pre-loaded with a ProbeVended result for "com.example.app" on "U1".
+func docsFixture() (*sandbox.FakeFS, *sandbox.FakeSandbox, *loadingProbeStore) {
+	fakeFS := &sandbox.FakeFS{
+		WalkResults: map[string][]sandbox.FileInfo{
+			"Documents": {
+				{Path: "Documents/secret.txt", Size: 100},
+				{Path: "Documents/photos/img.jpg", Size: 2048},
+			},
+		},
+	}
+	sb := sandbox.NewFakeSandbox()
+	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+		},
+	}
+	return fakeFS, sb, store
+}
+
+// TestAppsClean_documentsExactBundleMatchProceeds pins the happy path of the
+// Task 13 strict typed-bundle-ID gate: when the user types the bundle ID
+// exactly, the destructive RemoveAll on Documents/ fires and exit is 0.
+func TestAppsClean_documentsExactBundleMatchProceeds(t *testing.T) {
+	fakeFS, sb, store := docsFixture()
+	fp := &ui.FakePrompter{Lines: []string{"com.example.app"}}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--include-documents", "com.example.app"})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	// Documents uses per-file Remove (sandbox.Execute branches by target), so
+	// every walked entry must appear in RemoveCalls.
+	if len(fakeFS.RemoveCalls) != 2 {
+		t.Errorf("RemoveCalls = %v, want 2 entries from Documents walk", fakeFS.RemoveCalls)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "user data") {
+		t.Errorf("stdout should warn about user data; got: %q", out)
+	}
+	if !strings.Contains(out, "NOT recoverable") {
+		t.Errorf("stdout should warn files are NOT recoverable; got: %q", out)
+	}
+	if len(fp.AskedLines) != 1 {
+		t.Errorf("AskedLines = %v, want exactly one strict-gate prompt", fp.AskedLines)
+	}
+	// The Documents path must NOT also fall through to the basic y/N Confirm.
+	if len(fp.Asked) != 0 {
+		t.Errorf("Confirm was called on Documents path: %v", fp.Asked)
+	}
+}
+
+// TestAppsClean_documentsBundleMismatchAborts pins the abort path. Any typed
+// value that isn't an exact case-sensitive match (after TrimSpace) aborts
+// cleanly with exit 0, no destructive calls, and a "did not match" message.
+func TestAppsClean_documentsBundleMismatchAborts(t *testing.T) {
+	cases := []struct {
+		name  string
+		typed string
+	}{
+		{"typo", "com.example.ap"},
+		{"empty", ""},
+		{"different bundle", "com.example.other"},
+		{"case mismatch", "COM.EXAMPLE.APP"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeFS, sb, store := docsFixture()
+			fp := &ui.FakePrompter{Lines: []string{tc.typed}}
+
+			var stdout, stderr bytes.Buffer
+			exit := runAppsClean(context.Background(), appsDeps{
+				Stdout:   &stdout,
+				Stderr:   &stderr,
+				Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+				Sandbox:  sb,
+				Store:    store,
+				Prompter: fp,
+			}, []string{"--device", "U1", "--include-documents", "com.example.app"})
+
+			if exit != 0 {
+				t.Errorf("exit = %d, want 0 (clean abort); stderr=%q", exit, stderr.String())
+			}
+			if len(fakeFS.RemoveAllCalls) != 0 {
+				t.Errorf("RemoveAll was called after mismatch: %v", fakeFS.RemoveAllCalls)
+			}
+			if len(fakeFS.RemoveCalls) != 0 {
+				t.Errorf("Remove was called after mismatch: %v", fakeFS.RemoveCalls)
+			}
+			if !strings.Contains(stdout.String(), "did not match") {
+				t.Errorf("stdout should say 'did not match'; got: %q", stdout.String())
+			}
+		})
+	}
+}
+
+// TestAppsClean_documentsTrailingNewlineMatches pins TrimSpace behavior: a
+// trailing newline (as a real terminal would deliver) must not defeat the
+// match.
+func TestAppsClean_documentsTrailingNewlineMatches(t *testing.T) {
+	fakeFS, sb, store := docsFixture()
+	fp := &ui.FakePrompter{Lines: []string{"com.example.app\n"}}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--include-documents", "com.example.app"})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fakeFS.RemoveCalls) != 2 {
+		t.Errorf("RemoveCalls = %v, want 2 after trimmed match", fakeFS.RemoveCalls)
+	}
+}
+
+// TestAppsClean_yesDoesNotBypassDocumentsStrictGate is the safety pin: --yes
+// MUST NOT skip the typed-bundle-ID gate. The Prompter has a queued line; we
+// assert ReadLine was actually called once (gate ran) and that destructive
+// calls only happened because the line matched.
+func TestAppsClean_yesDoesNotBypassDocumentsStrictGate(t *testing.T) {
+	fakeFS, sb, store := docsFixture()
+	// Confirm must NEVER be called on the Documents path; ConfirmFn fails the
+	// test if it is.
+	fp := &ui.FakePrompter{
+		Lines: []string{"com.example.app"},
+		ConfirmFn: func(_ context.Context, q string) (bool, error) {
+			t.Fatalf("Confirm must not be called on --include-documents path; got %q", q)
+			return false, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Devices:  &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox:  sb,
+		Store:    store,
+		Prompter: fp,
+	}, []string{"--device", "U1", "--include-documents", "--yes", "com.example.app"})
+
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", exit, stderr.String())
+	}
+	if len(fp.AskedLines) != 1 {
+		t.Errorf("AskedLines = %v, want exactly one strict-gate prompt (--yes must NOT skip it)", fp.AskedLines)
+	}
+	if len(fakeFS.RemoveCalls) != 2 {
+		t.Errorf("RemoveCalls = %v, want 2 (gate cleared, per-file Remove fired)", fakeFS.RemoveCalls)
+	}
+}
+
 func TestAppsClean_refusesWhenProbeIsRefused(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	deps := appsDeps{

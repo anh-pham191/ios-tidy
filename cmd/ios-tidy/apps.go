@@ -208,10 +208,31 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 		return 0
 	}
 
-	// Task 12: basic y/N confirmation for the non-Documents flow. The
-	// Documents path (--include-documents) keeps the strict typed-bundle-ID
-	// gate added in Task 13; --yes does NOT bypass that gate.
-	if !*includeDocs && !*yes {
+	// Task 13: strict typed-bundle-ID gate for --include-documents. The user
+	// MUST type the bundle ID exactly (case-sensitive, TrimSpace applied) to
+	// confirm. --yes does NOT bypass this gate — Documents/ deletion is the
+	// only path that erases user data we can't recover, so the safety contract
+	// is "make the destructive intent impossible to fat-finger".
+	//
+	// Task 12: for the non-Documents flow, a basic y/N prompt suffices and
+	// --yes may skip it.
+	if *includeDocs {
+		fmt.Fprintf(deps.Stdout,
+			"WARNING: this will delete user data in %s's Documents folder. Files are NOT recoverable.\n",
+			bundleID)
+		typed, err := deps.Prompter.ReadLine(ctx,
+			fmt.Sprintf("Type the bundle ID (%s) to confirm:", bundleID))
+		if err != nil {
+			fmt.Fprintln(deps.Stderr, "error:", err)
+			return 1
+		}
+		if strings.TrimSpace(typed) != bundleID {
+			fmt.Fprintln(deps.Stdout, "Bundle ID did not match. Aborted.")
+			return 0
+		}
+		// Strict gate cleared. --yes does NOT bypass this gate, so no
+		// further Confirm() is issued on the Documents path.
+	} else if !*yes {
 		var totalBytes int64
 		for _, p := range plans {
 			totalBytes += p.TotalBytes

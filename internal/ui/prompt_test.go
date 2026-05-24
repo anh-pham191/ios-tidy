@@ -81,6 +81,75 @@ func TestFakePrompter_panicsWhenExhausted(t *testing.T) {
 	_, _ = fp.Confirm(ctx, "two") // should panic
 }
 
+func TestFakePrompter_ReadLine_returnsQueuedLines(t *testing.T) {
+	fp := &FakePrompter{Lines: []string{"first", "second"}}
+	ctx := context.Background()
+
+	got1, err := fp.ReadLine(ctx, "prompt1?")
+	if err != nil || got1 != "first" {
+		t.Fatalf("ReadLine #1 = (%q, %v), want (\"first\", nil)", got1, err)
+	}
+	got2, err := fp.ReadLine(ctx, "prompt2?")
+	if err != nil || got2 != "second" {
+		t.Fatalf("ReadLine #2 = (%q, %v), want (\"second\", nil)", got2, err)
+	}
+	wantPrompts := []string{"prompt1?", "prompt2?"}
+	if len(fp.AskedLines) != len(wantPrompts) {
+		t.Fatalf("AskedLines = %v, want %v", fp.AskedLines, wantPrompts)
+	}
+	for i, p := range wantPrompts {
+		if fp.AskedLines[i] != p {
+			t.Fatalf("AskedLines[%d] = %q, want %q", i, fp.AskedLines[i], p)
+		}
+	}
+}
+
+func TestFakePrompter_ReadLine_errorsWhenExhausted(t *testing.T) {
+	fp := &FakePrompter{}
+	got, err := fp.ReadLine(context.Background(), "prompt?")
+	if got != "" {
+		t.Errorf("ReadLine = %q, want empty", got)
+	}
+	if err == nil {
+		t.Fatalf("ReadLine err = nil, want error when queue exhausted")
+	}
+	if !strings.Contains(err.Error(), "no more queued lines") {
+		t.Errorf("err = %v, want 'no more queued lines'", err)
+	}
+	// Even on error, the call should be recorded so tests can assert that
+	// the gate ran.
+	if len(fp.AskedLines) != 1 || fp.AskedLines[0] != "prompt?" {
+		t.Errorf("AskedLines = %v, want [prompt?]", fp.AskedLines)
+	}
+}
+
+func TestFakePrompter_ReadLine_ReadLineErrTakesPrecedence(t *testing.T) {
+	want := errors.New("queued err")
+	fp := &FakePrompter{Lines: []string{"unused"}, ReadLineErr: want}
+	got, err := fp.ReadLine(context.Background(), "prompt?")
+	if got != "" {
+		t.Errorf("ReadLine = %q, want empty when ReadLineErr set", got)
+	}
+	if !errors.Is(err, want) {
+		t.Errorf("err = %v, want %v", err, want)
+	}
+}
+
+func TestStdinPrompter_ReadLine_trimsCRLF(t *testing.T) {
+	var stderr bytes.Buffer
+	p := NewStdinPrompter(strings.NewReader("hello\r\n"), &stderr)
+	got, err := p.ReadLine(context.Background(), "Type bundle:")
+	if err != nil {
+		t.Fatalf("ReadLine err = %v, want nil", err)
+	}
+	if got != "hello" {
+		t.Fatalf("ReadLine = %q, want %q", got, "hello")
+	}
+	if !strings.Contains(stderr.String(), "Type bundle:") {
+		t.Fatalf("stderr = %q, want it to contain the prompt", stderr.String())
+	}
+}
+
 func TestStdinPrompter_Confirm_defaultsNoTable(t *testing.T) {
 	cases := []struct {
 		name  string
