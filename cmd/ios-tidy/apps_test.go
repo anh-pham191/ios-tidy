@@ -383,3 +383,31 @@ func TestRunApps_dispatchListAndProbe(t *testing.T) {
 		}
 	})
 }
+
+// TestAppsProbe_zeroDevicesExits0 pins the M1 spec contract for the `apps
+// probe` arm of the dispatcher: when no devices are attached, the command
+// emits the informative stderr message produced by resolveDevice and exits 0.
+// `apps list`, `apps clean`, `crashlogs list`, and `crashlogs clean` already
+// follow this convention; `apps probe` was the last inconsistency island
+// because resolveDevice's error is wrapped with errDeviceResolution, which the
+// dispatcher previously mapped unconditionally to exit 1.
+//
+// The fix lives in the runApps dispatcher: it checks errors.Is(err,
+// errNoDevicesAttached) BEFORE the errDeviceResolution-suppression branch,
+// because fmt.Errorf("%w: %w", errDeviceResolution, err) wraps both sentinels
+// so errors.Is traverses through to the inner errNoDevicesAttached.
+func TestAppsProbe_zeroDevicesExits0(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := runApps(context.Background(), appsDeps{
+		Devices: &device.FakeLister{Devices: []device.Device{}},
+		Lister:  &apps.FakeLister{},
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+	}, []string{"probe", "--all"})
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0 (M1 spec: zero exit on empty device list); stderr=%q", exit, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no devices attached") {
+		t.Errorf("stderr should explain why nothing was done; got: %q", stderr.String())
+	}
+}

@@ -59,9 +59,19 @@ func runApps(ctx context.Context, deps appsDeps, args []string) int {
 	case "probe":
 		cmd := newAppsProbeCmd(deps)
 		if err := cmd.run(ctx, args[1:]); err != nil {
+			// Zero-devices is a clean no-op (M1 spec): exit 0. resolveDevice
+			// already wrote "no devices attached" to stderr. The probe path
+			// wraps that error as `fmt.Errorf("%w: %w", errDeviceResolution,
+			// err)` — double-%w wraps BOTH sentinels, so errors.Is traverses
+			// to the inner errNoDevicesAttached and we still detect it here.
+			// Other errDeviceResolution causes (e.g. "multiple devices
+			// attached") fall through to the suppression branch and exit 1.
+			if errors.Is(err, errNoDevicesAttached) {
+				return 0
+			}
 			// resolveDevice already wrote to stderr — suppress to avoid a
-			// duplicate "no devices attached" line. All other error paths
-			// produce messages that haven't been printed yet.
+			// duplicate "no devices attached"-style line. All other error
+			// paths produce messages that haven't been printed yet.
 			if !errors.Is(err, errDeviceResolution) {
 				fmt.Fprintln(deps.Stderr, err)
 			}
