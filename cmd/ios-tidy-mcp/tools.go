@@ -42,6 +42,7 @@ import (
 	"github.com/anh-pham191/ios-tidy/internal/cmdutil"
 	"github.com/anh-pham191/ios-tidy/internal/crashlogs"
 	"github.com/anh-pham191/ios-tidy/internal/device"
+	"github.com/anh-pham191/ios-tidy/internal/recommendations"
 	"github.com/anh-pham191/ios-tidy/internal/sandbox"
 	"github.com/anh-pham191/ios-tidy/internal/storage"
 )
@@ -316,6 +317,246 @@ apps_clean call will read from the same cache.`),
 		),
 		newAppsProbeHandler(deps),
 	)
+
+	s.AddTool(
+		mcp.NewTool("storage_recommendations",
+			mcp.WithDescription(`READ-ONLY synthesis: combine storage, apps, crashlogs, and probe-cache
+data into a prioritised, human-actionable plan for freeing space.
+
+This tool does NOT change anything on the device. It calls the same
+underlying seams as the storage / apps_list / crashlogs_list / apps_probe
+tools, then runs them through a pure synthesis layer to produce:
+
+  - device: {udid, name}
+  - summary: {freeBytes, totalBytes, percentFree, label}
+    label is "low" (<10% free), "normal" (<25%), or "high".
+  - recommendations: array of {priority, action, bundleID?, appName?,
+    estimatedRecoverBytes, rationale, viaTool}. Actions are one of:
+      clean_crashlogs       (use the crashlogs_clean tool)
+      offload_app           (use open_app_storage_settings — manual step
+                            on the iPhone; preserves user data via iCloud)
+      clean_app_sandbox     (use apps_clean; only for probe-vended apps)
+      review_unused_apps    (generic fallback; no tool can identify
+                            unused apps from launch data on the host)
+    Sorted by priority desc, then estimatedRecoverBytes desc.
+  - notTouchable: constant disclosure block. CRITICAL: surface this to
+    the user. It enumerates the data this tool CANNOT reach — system
+    caches, Safari/WebKit, Mail, Photos, the iOS "Other" bucket, and
+    Music/Podcasts downloads — so you don't make false promises about
+    cleaning them.
+
+Args:
+  udid (optional string): target device UDID. See devices_list rules.
+
+This is the recommended starting tool for "my iPhone is full" requests.`),
+			mcp.WithString("udid", mcp.Description("target device UDID")),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		newStorageRecommendationsHandler(deps),
+	)
+
+	s.AddTool(
+		mcp.NewTool("apps_offload_candidates",
+			mcp.WithDescription(`READ-ONLY: list installed user apps by reported disk usage with offload
+metadata. Smaller and simpler than storage_recommendations — use this
+when you only need the size-ranked app list without the crashlogs /
+probe-cache synthesis.
+
+com.apple.* system bundles are filtered out (ios-tidy does not touch
+them). Each row carries an offloadable boolean (always true for the
+non-system apps returned — heuristic; this tool does not claim to know
+whether a given app supports iCloud-backed restore) and a short
+rationale.
+
+When every reported size is zero (cold device — installation_proxy has
+not yet updated sizes since boot), the ranking falls back to bundleID
+ascending and a note is written to stderr (the MCP transport sees only
+the JSON result).
+
+Args:
+  udid (optional string): target device UDID.
+  limit (optional integer): keep only the top N rows. Default 10. 0 or
+    negative means "all".
+  min_bytes (optional integer): exclude rows whose totalBytes is below
+    this. Default 0.
+
+Returns: JSON array sorted by totalBytes desc.`),
+			mcp.WithString("udid", mcp.Description("target device UDID")),
+			mcp.WithNumber("limit", mcp.Description("top N rows; 0 or negative means all"), mcp.DefaultNumber(10)),
+			mcp.WithNumber("min_bytes", mcp.Description("minimum totalBytes filter"), mcp.DefaultNumber(0)),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		newAppsOffloadCandidatesHandler(deps),
+	)
+}
+
+// offloadCandidateRow is the JSON shape returned per element by
+// apps_offload_candidates. Mirrors the spec exactly so the LLM caller
+// can rely on stable keys.
+type offloadCandidateRow struct {
+	BundleID     string `json:"bundleID"`
+	AppName      string `json:"appName"`
+	Version      string `json:"version,omitempty"`
+	TotalBytes   int64  `json:"totalBytes"`
+	DynamicBytes uint64 `json:"dynamicBytes"`
+	StaticBytes  uint64 `json:"staticBytes"`
+	Offloadable  bool   `json:"offloadable"`
+	Rationale    string `json:"rationale"`
+}
+
+// crashlogsTotalBytes sums the .Size of every entry. Defined so the
+// recommendations handler can synthesize a "total bytes" input without
+// re-implementing the loop inline.
+func crashlogsTotalBytes(entries []crashlogs.Entry) int64 {
+	var total int64
+	for _, e := range entries {
+		total += e.Size
+	}
+	return total
+}
+
+// newStorageRecommendationsHandler returns the handler for the
+// storage_recommendations tool. The handler fetches the raw inputs
+// (storage / apps / crashlog count / probe cache), then calls
+// recommendations.Build to do the deterministic synthesis.
+//
+// Probe-cache load is best-effort: if ProbeStore is nil (only happens
+// in unit tests) or Load returns an error, we proceed with an empty
+// probe list. The synthesis layer treats "not vended" as "offload"
+// rather than "sandbox clean", which is the safer default — at worst
+// the user is told to offload an app that they could in fact
+// sandbox-clean, which is an honest fallback, not a safety regression.
+func newStorageRecommendationsHandler(deps serverDeps) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		override := req.GetString("udid", "")
+		udid, devName, resolved := resolveDeviceRef(ctx, deps, override)
+		if resolved != nil {
+			return resolved, nil
+		}
+
+		info, appList, err := fetchStorageInParallel(ctx, udid, deps.Storage, deps.Apps)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		var crashTotal int64
+		if deps.CrashLogs != nil {
+			entries, lerr := deps.CrashLogs.List(ctx, udid, "*")
+			if lerr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("list crash logs: %v", lerr)), nil
+			}
+			crashTotal = crashlogsTotalBytes(entries)
+		}
+
+		var probeResults []apps.ProbeResult
+		if deps.ProbeStore != nil {
+			r, perr := deps.ProbeStore.Load(udid)
+			if perr == nil {
+				probeResults = r
+			}
+			// Swallow probe-store errors: the absence of probe data only
+			// downgrades sandbox-clean recs to offload recs, which is the
+			// safe fallback. The error string would be noise.
+		}
+
+		payload := recommendations.Build(recommendations.Inputs{
+			UDID:          udid,
+			DeviceName:    devName,
+			FreeBytes:     info.FreeBytes,
+			TotalBytes:    info.TotalBytes,
+			Apps:          appList,
+			CrashlogBytes: crashTotal,
+			ProbeResults:  probeResults,
+		})
+		return jsonResult(payload)
+	}
+}
+
+// newAppsOffloadCandidatesHandler returns the handler for the
+// apps_offload_candidates tool.
+//
+// The "all-zero bytes" branch falls back to bundleID-ascending order
+// and writes a one-line note to stderr (the MCP transport reserves
+// stdout for the JSON-RPC stream). The fallback signal lets the
+// caller / operator notice when installation_proxy has not yet
+// populated sizes — common just after boot, when cold apps haven't
+// run.
+func newAppsOffloadCandidatesHandler(deps serverDeps) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		override := req.GetString("udid", "")
+		limit := req.GetInt("limit", 10)
+		minBytes := req.GetInt("min_bytes", 0)
+
+		udid, resolved := resolveDeviceForTool(ctx, deps, override)
+		if resolved != nil {
+			return resolved, nil
+		}
+
+		list, err := deps.Apps.UserApps(ctx, udid)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("list apps: %v", err)), nil
+		}
+
+		// Filter com.apple.*. Build the candidate list first so we can
+		// detect the all-zero case (after filtering — system apps with
+		// non-zero sizes do NOT count toward "warm signal").
+		candidates := make([]apps.App, 0, len(list))
+		for _, a := range list {
+			if isAppleSystemBundle(a.BundleID) {
+				continue
+			}
+			candidates = append(candidates, a)
+		}
+
+		// Decide sort key. If every candidate has zero total bytes,
+		// sort by BundleID asc and emit the stderr note. Otherwise sort
+		// by total bytes desc.
+		allZero := true
+		for _, a := range candidates {
+			if a.DynamicBytes+a.StaticBytes > 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero && len(candidates) > 0 {
+			fmt.Fprintln(os.Stderr,
+				"apps_offload_candidates: all reported sizes are zero; "+
+					"falling back to bundleID-ascending order. "+
+					"This usually means installation_proxy has not yet "+
+					"updated sizes since boot — re-run after launching apps.")
+		}
+		apps.Sort(candidates)
+
+		// min_bytes filter. Applied AFTER sort so the row order stays
+		// consistent across calls with and without a filter.
+		filtered := make([]apps.App, 0, len(candidates))
+		for _, a := range candidates {
+			total := int64(a.DynamicBytes + a.StaticBytes)
+			if total < int64(minBytes) {
+				continue
+			}
+			filtered = append(filtered, a)
+		}
+		filtered = apps.Limit(filtered, limit)
+
+		rows := make([]offloadCandidateRow, len(filtered))
+		for i, a := range filtered {
+			rows[i] = offloadCandidateRow{
+				BundleID:     a.BundleID,
+				AppName:      a.Name,
+				Version:      a.Version,
+				TotalBytes:   int64(a.DynamicBytes + a.StaticBytes),
+				DynamicBytes: a.DynamicBytes,
+				StaticBytes:  a.StaticBytes,
+				Offloadable:  true,
+				Rationale: "Third-party app. Offload removes the binary + caches " +
+					"but preserves user data and login state via iCloud (when " +
+					"the user has iCloud enabled). Uninstall does not preserve " +
+					"user data.",
+			}
+		}
+		return jsonResult(rows)
+	}
 }
 
 // mcpToolHost is the subset of *server.MCPServer that addReadOnlyTools

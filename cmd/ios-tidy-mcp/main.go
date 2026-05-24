@@ -3,15 +3,17 @@
 // ios-tidy-mcp speaks the Model Context Protocol over stdio so an MCP
 // client (Claude Desktop, Claude Code, etc.) can drive ios-tidy. Tools
 // are added incrementally; this binary currently exposes:
-//   - version             (smoke-test)
-//   - devices_list        (read-only)
-//   - storage             (read-only)
-//   - crashlogs_list      (read-only)
-//   - apps_list           (read-only)
-//   - apps_probe          (read-only; persists results to the shared cache)
-//   - crashlogs_pull      (non-destructive on device; writes to host)
-//   - crashlogs_clean     (DESTRUCTIVE; default dry-run, confirm=true required)
-//   - apps_clean          (DESTRUCTIVE; probe-gated, typed-bundle-ID confirmation)
+//   - version                     (smoke-test)
+//   - devices_list                (read-only)
+//   - storage                     (read-only)
+//   - crashlogs_list              (read-only)
+//   - apps_list                   (read-only)
+//   - apps_probe                  (read-only; persists results to the shared cache)
+//   - storage_recommendations     (read-only synthesis layer; v0.3.0)
+//   - apps_offload_candidates     (read-only; size-ranked app list with offload metadata; v0.3.0)
+//   - crashlogs_pull              (non-destructive on device; writes to host)
+//   - crashlogs_clean             (DESTRUCTIVE; default dry-run, confirm=true required)
+//   - apps_clean                  (DESTRUCTIVE; probe-gated, typed-bundle-ID confirmation)
 //
 // Safety model (binding for every destructive tool added later):
 //   - Destructive tools refuse without an explicit confirmation arg.
