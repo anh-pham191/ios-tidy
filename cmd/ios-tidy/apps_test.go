@@ -33,6 +33,15 @@ func (f *fakeProbeStore) Save(udid string, r []apps.ProbeResult) error {
 }
 func (f *fakeProbeStore) Load(_ string) ([]apps.ProbeResult, error) { return nil, nil }
 
+// probeDevs returns a device.FakeLister containing the single UDID "UDID"
+// used by the probe-tests below. After the selectDevice/resolveDevice
+// unification (backlog #33), `--device <UDID>` is validated against the
+// connected device list, so the tests must wire a Lister even when they
+// pass an explicit override.
+func probeDevs() *device.FakeLister {
+	return &device.FakeLister{Devices: []device.Device{{UDID: "UDID", Name: "Phone"}}}
+}
+
 func TestAppsProbe_requiresAllOrBundle(t *testing.T) {
 	cmd := newAppsProbeCmd(appsDeps{})
 	err := cmd.run(context.Background(), []string{"--device", "UDID"})
@@ -67,6 +76,7 @@ func TestAppsProbe_allProbesEveryUserApp(t *testing.T) {
 		Sandbox: sb,
 		Store:   store,
 		Stdout:  &out,
+		Devices: probeDevs(),
 	})
 	if err := cmd.run(context.Background(), []string{"--device", "UDID", "--all"}); err != nil {
 		t.Fatalf("run: %v", err)
@@ -113,7 +123,7 @@ func TestAppsProbe_bundleFlagProbesExactlyThoseInOrder(t *testing.T) {
 	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
 	store := &fakeProbeStore{}
 
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}, Devices: probeDevs()})
 	if err := cmd.run(context.Background(),
 		[]string{"--device", "UDID", "--bundle", "com.c", "--bundle", "com.a"},
 	); err != nil {
@@ -133,7 +143,7 @@ func TestAppsProbe_bundleNotInstalledYieldsUnknown(t *testing.T) {
 	store := &fakeProbeStore{}
 
 	var out bytes.Buffer
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &out})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &out, Devices: probeDevs()})
 	if err := cmd.run(context.Background(),
 		[]string{"--device", "UDID", "--bundle", "com.ghost"},
 	); err != nil {
@@ -158,7 +168,7 @@ func TestAppsProbe_timeoutFlagAppliedPerProbe(t *testing.T) {
 	sb.SetResponse("com.hang", sandbox.FakeResponse{Hang: true})
 	store := &fakeProbeStore{}
 
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}, Devices: probeDevs()})
 	start := time.Now()
 	if err := cmd.run(context.Background(),
 		[]string{"--device", "UDID", "--all", "--timeout", "30ms"},
@@ -189,7 +199,7 @@ func TestAppsProbe_storeDirOverrideHonoured(t *testing.T) {
 	sb := sandbox.NewFakeSandbox()
 	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
 
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}, Devices: probeDevs()})
 	if err := cmd.run(context.Background(),
 		[]string{"--device", "UDID", "--all", "--store-dir", dir},
 	); err != nil {
@@ -208,7 +218,7 @@ func TestAppsProbe_storeDirRejectsUnsafePath(t *testing.T) {
 	sb := sandbox.NewFakeSandbox()
 	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
 
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}, Devices: probeDevs()})
 	err := cmd.run(context.Background(),
 		[]string{"--device", "UDID", "--all", "--store-dir", "/"},
 	)
@@ -227,7 +237,7 @@ func TestAppsProbe_storeDirEscapeHatchAllowsAnyPath(t *testing.T) {
 	sb := sandbox.NewFakeSandbox()
 	sb.SetResponse("com.a", sandbox.FakeResponse{FS: &sandbox.FakeFS{}})
 
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Stdout: &bytes.Buffer{}, Devices: probeDevs()})
 	if err := cmd.run(context.Background(),
 		[]string{"--device", "UDID", "--all", "--store-dir", dir},
 	); err != nil {
@@ -242,7 +252,7 @@ func TestAppsProbe_jsonOutputShape(t *testing.T) {
 	store := &fakeProbeStore{}
 
 	var out bytes.Buffer
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &out})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &out, Devices: probeDevs()})
 	if err := cmd.run(context.Background(),
 		[]string{"--device", "UDID", "--all", "--json"},
 	); err != nil {
@@ -264,7 +274,7 @@ func TestAppsProbe_exitsZeroEvenIfAllRefused(t *testing.T) {
 	sb.SetResponse("com.a", sandbox.FakeResponse{Err: errors.New("VendContainer failed: denied")})
 	store := &fakeProbeStore{}
 
-	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}})
+	cmd := newAppsProbeCmd(appsDeps{Lister: lister, Sandbox: sb, Store: store, Stdout: &bytes.Buffer{}, Devices: probeDevs()})
 	if err := cmd.run(context.Background(), []string{"--device", "UDID", "--all"}); err != nil {
 		t.Errorf("run returned error, want nil even for ProbeRefused: %v", err)
 	}

@@ -30,12 +30,12 @@ func runStorage(
 	al apps.Lister,
 	stdout, stderr io.Writer,
 ) int {
-	udid, exit, err := selectDevice(ctx, opts.Device, dl, stderr)
-	if exit != 0 || err != nil {
-		return exit
-	}
-	if udid == "" {
+	udid, err := resolveDevice(ctx, dl, opts.Device, stderr)
+	if errors.Is(err, errNoDevicesAttached) {
 		return 0
+	}
+	if err != nil {
+		return 1
 	}
 
 	info, appList, err := fetchInParallel(ctx, udid, sc, al)
@@ -155,34 +155,4 @@ func renderJSON(info storage.DeviceInfo, list []apps.App, stdout, stderr io.Writ
 		return 1
 	}
 	return 0
-}
-
-func selectDevice(ctx context.Context, requested string, dl device.Lister, stderr io.Writer) (string, int, error) {
-	devices, err := dl.List(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "list devices: %v\n", err)
-		return "", 1, err
-	}
-	if requested != "" {
-		for _, d := range devices {
-			if d.UDID == requested {
-				return requested, 0, nil
-			}
-		}
-		fmt.Fprintf(stderr, "device %q not connected\n", requested)
-		return "", 1, errors.New("device not connected")
-	}
-	switch len(devices) {
-	case 0:
-		fmt.Fprintln(stderr, "no devices connected")
-		return "", 0, nil
-	case 1:
-		return devices[0].UDID, 0, nil
-	default:
-		fmt.Fprintln(stderr, "multiple devices connected; pass --device <udid>:")
-		for _, d := range devices {
-			fmt.Fprintf(stderr, "  %s  %s  %s\n", d.UDID, d.Name, d.IOSVersion)
-		}
-		return "", 1, errors.New("ambiguous device")
-	}
 }

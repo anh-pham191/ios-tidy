@@ -28,40 +28,6 @@ type runDeps struct {
 	Stderr   io.Writer
 }
 
-// errNoDevicesAttached is the sentinel returned by resolveDevice when the
-// device list is empty (as opposed to "lookup failed"). Callers map it to
-// exit code 0 — M1 spec says zero-device is a clean, informative no-op, not
-// an error. The stderr message is still emitted by resolveDevice so the user
-// learns why nothing happened. A future refactor (backlog #33) will replace
-// this sentinel with a more idiomatic two-return signal.
-var errNoDevicesAttached = errors.New("no devices attached")
-
-// resolveDevice picks the target UDID. If override is non-empty, it's used
-// verbatim. Otherwise: zero attached → errNoDevicesAttached sentinel (caller
-// should exit 0); one → that one; many → error listing UDIDs.
-func resolveDevice(ctx context.Context, l device.Lister, override string, stderr io.Writer) (string, error) {
-	if override != "" {
-		return override, nil
-	}
-	devs, err := l.List(ctx)
-	if err != nil {
-		return "", fmt.Errorf("list devices: %w", err)
-	}
-	switch len(devs) {
-	case 0:
-		fmt.Fprintln(stderr, "no devices attached")
-		return "", errNoDevicesAttached
-	case 1:
-		return devs[0].UDID, nil
-	default:
-		fmt.Fprintln(stderr, "multiple devices attached; use --device UDID:")
-		for _, d := range devs {
-			fmt.Fprintf(stderr, "  %s  %s\n", d.UDID, d.Name)
-		}
-		return "", errors.New("multiple devices attached")
-	}
-}
-
 // runCrashLogsList implements `crashlogs list`. Returns the process exit code.
 func runCrashLogsList(ctx context.Context, deps runDeps, args []string) int {
 	fs := flag.NewFlagSet("crashlogs list", flag.ContinueOnError)

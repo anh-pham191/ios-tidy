@@ -104,6 +104,31 @@ func TestStorageCmd_deviceFlag_noMatch_errors(t *testing.T) {
 	}
 }
 
+// TestStorageCmd_unknownDeviceExitsNonZeroWithNotAttached pins the
+// post-refactor (backlog #33) contract: passing --device <unknown> when a
+// device list IS reachable validates the override against that list and
+// fails fast with the "not attached" wording shared by every other
+// subcommand. Pre-refactor, storage used selectDevice with the "not
+// connected" wording; this test would have passed with the loose substring
+// match in TestStorageCmd_deviceFlag_noMatch_errors but is documented
+// separately here so the wording shift cannot regress silently.
+func TestStorageCmd_unknownDeviceExitsNonZeroWithNotAttached(t *testing.T) {
+	dev := &device.FakeLister{Devices: []device.Device{{UDID: "U1", Name: "OnePhone"}}}
+	st, ap := &storage.FakeClient{}, &apps.FakeLister{}
+	var stdout, stderr bytes.Buffer
+
+	exit := runStorage(context.Background(), storageOpts{Device: "U9"}, dev, st, ap, &stdout, &stderr)
+	if exit == 0 {
+		t.Fatalf("exit = 0, want non-zero for unknown --device override")
+	}
+	if !strings.Contains(stderr.String(), "not attached") {
+		t.Fatalf("stderr should use the 'not attached' wording shared with every other subcommand, got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "U9") {
+		t.Fatalf("stderr should echo the unknown UDID, got %q", stderr.String())
+	}
+}
+
 func TestStorageCmd_textOutput_singleDevice_rendersHeaderAndSortedTable(t *testing.T) {
 	dev, st, ap := newFixture()
 	var stdout, stderr bytes.Buffer
