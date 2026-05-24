@@ -253,6 +253,23 @@ make lint
 
 Runs `go vet ./...` plus `staticcheck ./...` if `staticcheck` is on `PATH`.
 
+## MCP server (drive from Claude Desktop)
+
+`ios-tidy` ships with a sibling binary `ios-tidy-mcp` that speaks the
+[Model Context Protocol](https://modelcontextprotocol.io) over stdio.
+Wire it into Claude Desktop and an LLM can drive `apps_probe` →
+`apps_clean --dry-run` → `apps_clean` (with explicit re-confirmation)
+the same way you would by hand.
+
+Build:
+
+```bash
+make build-mcp
+```
+
+Wire it up: see [docs/MCP.md](docs/MCP.md) for the Claude Desktop config
+snippet and the safety contract for destructive tools.
+
 ## License
 
 MIT. See `LICENSE`.

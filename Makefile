@@ -1,4 +1,4 @@
-.PHONY: test test-device test-cover lint build build-mcp clean
+.PHONY: test test-device test-smoke test-cover lint build build-mcp clean
 
 GO            ?= go
 PKG            = ./...
@@ -16,6 +16,9 @@ test-device:
 	  echo "IOS_TIDY_TEST_UDID must be set for device tests"; exit 2; \
 	fi
 	$(GO) test -tags=device ./internal/iosbackend/...
+
+test-smoke: build-mcp
+	$(GO) test -tags=smoke ./cmd/ios-tidy-mcp/...
 
 test-cover:
 	$(GO) test -coverprofile=coverage.out $(PKG)

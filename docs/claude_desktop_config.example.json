@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ios-tidy": {
+      "command": "/ABSOLUTE/PATH/TO/bin/ios-tidy-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
