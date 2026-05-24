@@ -183,7 +183,20 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 			bundleID)
 		return 1
 	}
-	if !probeVended(results, bundleID) {
+	// TTL-aware probe gate. A Vended outcome older than probeTTLForCLIClean
+	// is treated as stale — the device's daemon policy may have shifted,
+	// or the user may have reinstalled / re-signed the app since the probe.
+	// We tell the user how to refresh and refuse rather than silently
+	// proceed on cached information that may no longer reflect reality.
+	if !probeVendedFresh(results, bundleID, time.Now(), probeTTLForCLIClean) {
+		if probeVended(results, bundleID) {
+			fmt.Fprintf(deps.Stderr,
+				"error: probe result for %q is older than %s. Re-run\n"+
+					"  ios-tidy apps probe --bundle %s\n"+
+					"to refresh before cleaning.\n",
+				bundleID, probeTTLForCLIClean, bundleID)
+			return 1
+		}
 		fmt.Fprintf(deps.Stderr,
 			"error: bundle %q has not been confirmed as vended on device %s.\n"+
 				"Run `ios-tidy apps probe --bundle %s` first to check whether\n"+
@@ -276,7 +289,7 @@ func runAppsClean(ctx context.Context, deps appsDeps, args []string) int {
 			totalBytes += p.TotalBytes
 		}
 		question := fmt.Sprintf(
-			"Delete %s across %d target(s) in %s?",
+			"Delete %s across %d target(s) in %s? (force-quit the app on your phone first to avoid losing in-flight files)",
 			ui.FormatBytes(uint64(totalBytes)), len(plans), bundleID)
 		ok, err := deps.Prompter.Confirm(ctx, question)
 		if err != nil {
@@ -328,6 +341,40 @@ func reportResults(stdout, stderr io.Writer, results []sandbox.CleanResult) int 
 		return 1
 	}
 	return 0
+}
+
+// probeTTLForCLIClean is how recent a Vended probe must be for `apps
+// clean` to accept it. 24h is intentionally more relaxed than the MCP
+// path's 5min — the CLI has a typed-bundle-ID human prompt on the
+// Documents path and a y/N confirm on the others, both of which keep a
+// human in the loop even after a stale probe slips through. Changing
+// this value is a deliberate code edit, not a flag — same rationale as
+// probeTTLForMCPClean.
+const probeTTLForCLIClean = 24 * time.Hour
+
+// probeVendedFresh reports whether results contains a Vended outcome for
+// bundleID stamped within ttl of now. Iterates newest-first by .At so
+// the freshest matching entry wins (the on-disk store is sorted by
+// bundleID, not timestamp, so positional newness is unreliable).
+func probeVendedFresh(results []apps.ProbeResult, bundleID string, now time.Time, ttl time.Duration) bool {
+	var newest apps.ProbeResult
+	found := false
+	for _, r := range results {
+		if r.BundleID != bundleID {
+			continue
+		}
+		if !found || r.At.After(newest.At) {
+			newest = r
+			found = true
+		}
+	}
+	if !found {
+		return false
+	}
+	if newest.Outcome != apps.ProbeVended {
+		return false
+	}
+	return now.Sub(newest.At) <= ttl
 }
 
 // isAppleSystemBundle reports whether bundleID looks like an Apple system

@@ -163,6 +163,17 @@ ios-tidy apps clean com.example.myapp --include-documents
 
 The Documents flow asks you to retype the bundle ID exactly (case-sensitive) before any file is deleted. This is by design: Documents holds user data and is not recoverable from this side.
 
+**Force-quit the target app on the device before running `apps clean`.** ios-tidy has no way to detect over USB whether an app is currently running, and deleting files out from under a live app can lose unsaved data in flight (drafts in `tmp/`, partially-written caches, in-flight downloads). On your iPhone, swipe up from the bottom and flick the app's preview off the top before running the command. The interactive y/N prompt repeats this guidance, but the safest workflow is: force-quit first, then run the command.
+
+#### Probe TTL
+
+`apps clean` consults the probe cache (`apps probe`) to confirm the daemon will vend a sandbox before doing any work. The cached result must be recent:
+
+- **CLI** (`ios-tidy apps clean`): 24 hours. The interactive prompt (and the typed-bundle-ID gate for `--include-documents`) keep a human in the loop, so the window is intentionally relaxed.
+- **MCP** (`apps_clean` tool): 5 minutes. The MCP path has no human in the loop between probe and clean, so the window is tight to prevent an LLM caller from consuming a probe result from many turns ago.
+
+If you see "probe result is older than ..." re-run `ios-tidy apps probe --bundle <BUNDLE_ID>` to refresh.
+
 ## Troubleshooting
 
 ### "no device connected" / "multiple devices connected"

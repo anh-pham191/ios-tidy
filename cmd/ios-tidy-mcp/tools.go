@@ -655,7 +655,15 @@ Returns:
 			mcp.WithDescription(`Delete sandbox files for one app on the device.
 
 DESTRUCTIVE: this tool removes files inside an app's container on the
-device. Three independent, non-bypassable safety gates:
+device.
+
+IMPORTANT: before calling with dry_run=false, ask the user to force-quit
+the target app on their iPhone. ios-tidy cannot detect whether an app
+is currently running over USB; deleting files out from under a live app
+can lose unsaved data. Force-quitting takes a couple of seconds and
+eliminates the race entirely.
+
+Three independent, non-bypassable safety gates:
 
   1. PROBE GATE: the bundle MUST have a Vended probe outcome on record
      (see apps_probe). If not, the tool refuses and tells you to run

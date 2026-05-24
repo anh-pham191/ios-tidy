@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anh-pham191/ios-tidy/internal/apps"
 	"github.com/anh-pham191/ios-tidy/internal/device"
@@ -89,7 +90,7 @@ func TestAppsClean_opensSandboxAfterProbeGate(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 
@@ -146,7 +147,7 @@ func TestAppsClean_dryRunNeverCallsRemoveOrPrompter(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	fp := &ui.FakePrompter{
@@ -201,7 +202,7 @@ func TestAppsClean_dryRunWithDocumentsNeverCallsRemoveOrPrompter(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	fp := &ui.FakePrompter{
@@ -255,7 +256,7 @@ func TestAppsClean_basicPromptNoAborts(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	fp := ui.NewFakePrompter([]bool{false})
@@ -303,7 +304,7 @@ func TestAppsClean_basicPromptYesProceeds(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	fp := ui.NewFakePrompter([]bool{true})
@@ -350,7 +351,7 @@ func TestAppsClean_yesFlagSkipsBasicPrompt(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	fp := ui.NewFakePrompter(nil)
@@ -401,7 +402,7 @@ func TestAppsClean_partialFailureReportsAndExitsNonZero(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 
@@ -442,7 +443,7 @@ func docsFixture() (*sandbox.FakeFS, *sandbox.FakeSandbox, *loadingProbeStore) {
 	sb.SetResponse("com.example.app", sandbox.FakeResponse{FS: fakeFS})
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	return fakeFS, sb, store
@@ -650,7 +651,7 @@ func TestAppsClean_dryRunFlagAfterBundleIDIsHonored(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	fp := &ui.FakePrompter{
@@ -699,7 +700,7 @@ func TestAppsClean_deviceFlagAfterBundleIDIsHonored(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U2": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U2": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 
@@ -773,7 +774,7 @@ func TestAppsClean_yesFlagAfterBundleIDIsHonored(t *testing.T) {
 
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	fp := ui.NewFakePrompter(nil) // empty queue — any Confirm call would panic
@@ -822,7 +823,7 @@ func TestAppsClean_openErrorHintsStaleProbe(t *testing.T) {
 	bang := errors.New("connect afc service failed")
 	store := &loadingProbeStore{
 		Results: map[string][]apps.ProbeResult{
-			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended}},
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now()}},
 		},
 	}
 	sb := sandbox.NewFakeSandbox()
@@ -849,6 +850,79 @@ func TestAppsClean_openErrorHintsStaleProbe(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "stale") {
 		t.Errorf("stderr should explain the staleness possibility; got: %q", stderr.String())
+	}
+}
+
+// ----------------------------------------------------------------------
+// M-2: CLI probe TTL (24h)
+// ----------------------------------------------------------------------
+
+// TestProbeVended_rejectsExpiredVendedResult pins the TTL: a Vended
+// probe older than 24h is treated as expired. The CLI gives the user
+// a more relaxed window than the MCP path (5min) because the typed-
+// bundle-ID human prompt compensates.
+func TestProbeVended_rejectsExpiredVendedResult(t *testing.T) {
+	now := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	results := []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-25 * time.Hour)},
+	}
+	if probeVendedFresh(results, "com.example.app", now, 24*time.Hour) {
+		t.Errorf("25h-old probe must be treated as expired")
+	}
+}
+
+// TestProbeVended_acceptsRecentVendedResult pins the positive control.
+func TestProbeVended_acceptsRecentVendedResult(t *testing.T) {
+	now := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	results := []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-1 * time.Hour)},
+	}
+	if !probeVendedFresh(results, "com.example.app", now, 24*time.Hour) {
+		t.Errorf("1h-old probe should still be fresh")
+	}
+}
+
+// TestProbeVended_boundaryInclusive pins the TTL boundary semantics:
+// (24h - 1s) is fresh, (24h + 1s) is stale. Anchors the comparison so
+// a careless < vs <= swap doesn't shift the cutoff.
+func TestProbeVended_boundaryInclusive(t *testing.T) {
+	now := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	fresh := []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-(24*time.Hour - 1*time.Second))},
+	}
+	if !probeVendedFresh(fresh, "com.example.app", now, 24*time.Hour) {
+		t.Errorf("24h - 1s must be fresh")
+	}
+	stale := []apps.ProbeResult{
+		{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: now.Add(-(24*time.Hour + 1*time.Second))},
+	}
+	if probeVendedFresh(stale, "com.example.app", now, 24*time.Hour) {
+		t.Errorf("24h + 1s must be stale")
+	}
+}
+
+// TestAppsClean_refusesStaleProbeAndWarnsToReProbe pins the user-facing
+// contract: an expired probe surfaces a stderr warning naming
+// `ios-tidy apps probe` AND apps clean exits non-zero.
+func TestAppsClean_refusesStaleProbeAndWarnsToReProbe(t *testing.T) {
+	store := &loadingProbeStore{
+		Results: map[string][]apps.ProbeResult{
+			"U1": {{BundleID: "com.example.app", Outcome: apps.ProbeVended, At: time.Now().Add(-48 * time.Hour)}},
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	exit := runAppsClean(context.Background(), appsDeps{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Devices: &device.FakeLister{Devices: []device.Device{{UDID: "U1"}}},
+		Sandbox: &trapSandbox{t: t},
+		Store:   store,
+	}, []string{"com.example.app", "--device", "U1"})
+	if exit == 0 {
+		t.Fatalf("exit = 0 for 48h-old probe, want non-zero")
+	}
+	if !strings.Contains(stderr.String(), "apps probe") {
+		t.Errorf("stderr should mention re-running apps probe; got: %q", stderr.String())
 	}
 }
 
