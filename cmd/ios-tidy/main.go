@@ -69,6 +69,15 @@ func dispatch(
 			Stderr:   errOut,
 		}
 		return runCrashLogs(ctx, deps, args[1:])
+	case "apps":
+		al, _ := iosbackend.NewApps()
+		deps := appsDeps{
+			Lister:  al,
+			Devices: lister,
+			Stdout:  out,
+			Stderr:  errOut,
+		}
+		return runApps(ctx, deps, args[1:])
 	default:
 		fmt.Fprintf(errOut, "ios-tidy: unknown subcommand %q\n", args[0])
 		printUsage(errOut)
@@ -83,6 +92,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  devices    list connected iPhones")
 	fmt.Fprintln(w, "  storage    show device free/used + app sizes")
 	fmt.Fprintln(w, "  crashlogs  list, pull, or clean crash reports")
+	fmt.Fprintln(w, "  apps       list installed apps + probe per-app vending")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "global flags:")
 	fmt.Fprintln(w, "  --version  print version and exit")
